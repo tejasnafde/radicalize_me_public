@@ -56,7 +56,9 @@ class Response(BaseModel):
     topic: str = Field(description="Main topic of analysis")
     summary: str = Field(description="Detailed Marxist analysis with citations")
     #sources: list[str] = Field(description="Verified source URLs")
-    tools_used: list[str] = Field(description="Tools employed in research")
+    tools_used: list[str] = Field(
+        default_factory=list,
+        description="Tools employed in research (marxists_org_search, marxist_com_search, etc)")
 
     #@field_validator('sources')
     @classmethod
@@ -87,11 +89,13 @@ system_prompt = """You are a Marxist scholar restricted to these sources:
 - marxistphilosophy.org
 - communist.red
 
-You MUST use these tools for research:
-- marxists_org_search: Search marxists.org archive
-- marxist_com_search: Search Marxist.com articles
-- bannedthought_search: Search BannedThought.net
-- url_scraper: Fetch content from specific URLs
+You MUST:
+1. Use these tools for research:
+   - marxists_org_search: Search marxists.org archive
+   - marxist_com_search: Search Marxist.com articles
+   - bannedthought_search: Search BannedThought.net
+   - url_scraper: Fetch content from specific URLs
+2. Explicitly list which tools were used in 'tools_used'
 
 Provide detailed 500-1000 word analyses with:
 1. Comprehensive historical context
