@@ -5,6 +5,7 @@ import asyncio
 from aiohttp import web
 import traceback
 from discord.ext import commands
+import datetime
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator, ValidationError
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -20,7 +21,8 @@ from tools import (
     allowed_domains
 )
 KEEP_ALIVE_CHANNEL_ID = 881890878308896778
-PING_INTERVAL = 9 * 60
+BOT_ID = None
+PING_INTERVAL = 600
 load_dotenv()
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -38,11 +40,12 @@ async def keep_alive():
     channel = client.get_channel(KEEP_ALIVE_CHANNEL_ID)
     while not client.is_closed():
         try:
-            await channel.send("🔄 Dialectical heartbeat detected")
-            print("Sent keep-alive ping")
+            msg = await channel.send("❤️")
+            await msg.add_reaction('✅')
+            print(f"Heartbeat sent at {datetime.now().isoformat()}")
             await asyncio.sleep(PING_INTERVAL)
         except Exception as e:
-            print(f"Keep-alive error: {str(e)}")
+            print(f"Heartbeat error: {str(e)}")
             await asyncio.sleep(60)
 
 tools = [marxists_org_search,
@@ -152,11 +155,16 @@ async def on_ready():
     for tool in tools:
         print(f"- {tool.name}: {tool.description}")
     print("-------------------------------")
-    client.loop.create_task(keep_alive())
     await web_server()
+    client.loop.create_task(keep_alive())
+    
 
 @client.event
 async def on_message(message):
+    if message.channel.id == KEEP_ALIVE_CHANNEL_ID and message.author.id == BOT_ID:
+        if message.mentions and message.mentions[0].id == BOT_ID:
+            await message.add_reaction('✅')
+            return
     if message.author.bot:
         return
 
@@ -215,8 +223,10 @@ async def web_server():
     app.router.add_get("/", lambda _: web.Response(text="Marxist bot operational"))
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8080)))
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    print(f"⚒️ Web server active on port {port}")
 
 
 
