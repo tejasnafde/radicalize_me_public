@@ -1,6 +1,8 @@
 import discord
 import re
 import os
+import asyncio
+from aiohttp import web
 import traceback
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -17,7 +19,8 @@ from tools import (
     url_scraper,
     allowed_domains
 )
-
+KEEP_ALIVE_CHANNEL_ID = 881890878308896778
+PING_INTERVAL = 14 * 60
 load_dotenv()
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -29,6 +32,19 @@ client = commands.Bot(
     command_prefix=commands.when_mentioned,
     intents=intents
 )
+
+async def keep_alive():
+    await client.wait_until_ready()
+    channel = client.get_channel(KEEP_ALIVE_CHANNEL_ID)
+    while not client.is_closed():
+        try:
+            await channel.send("🔄 Dialectical heartbeat detected")
+            print("Sent keep-alive ping")
+            await asyncio.sleep(PING_INTERVAL)
+        except Exception as e:
+            print(f"Keep-alive error: {str(e)}")
+            await asyncio.sleep(60)
+
 tools = [marxists_org_search,
     marxist_com_search,
     bannedthought_search,
@@ -136,6 +152,8 @@ async def on_ready():
     for tool in tools:
         print(f"- {tool.name}: {tool.description}")
     print("-------------------------------")
+    client.loop.create_task(keep_alive())
+    await web_server()
 
 @client.event
 async def on_message(message):
@@ -191,6 +209,15 @@ async def on_message(message):
         return
 
     await client.process_commands(message)
+
+async def web_server():
+    app = web.Application()
+    app.router.add_get("/", lambda _: web.Response(text="Marxist bot operational"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8080)))
+    await site.start()
+
 
 
 client.run(DISCORD_TOKEN)
