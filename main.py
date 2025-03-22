@@ -20,7 +20,7 @@ from tools import (
     allowed_domains
 )
 KEEP_ALIVE_CHANNEL_ID = 881890878308896778
-PING_INTERVAL = 14 * 60
+PING_INTERVAL = 9 * 60
 load_dotenv()
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
