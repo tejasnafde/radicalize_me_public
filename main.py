@@ -5,7 +5,7 @@ import asyncio
 from aiohttp import web
 import traceback
 from discord.ext import commands
-import datetime
+from datetime import datetime
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator, ValidationError
 from langchain_google_genai import ChatGoogleGenerativeAI
