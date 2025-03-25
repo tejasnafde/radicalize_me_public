@@ -19,9 +19,9 @@ langchain
 langchain-core==0.3.47
 langchain-google-genai==2.0.10
 lxml==5.3.0
-numpy==1.26.4  # Downgraded for compatibility
-pydantic==2.10.6
-pydantic_core==2.27.2
+numpy
+pydantic
+pydantic_core
 python-dotenv==1.0.1
 regex==2024.4.28
 requests==2.31.0
@@ -29,3 +29,4 @@ tqdm==4.67.1
 typing_extensions==4.12.2
 urllib3==2.3.0
 yarl==1.18.3
+praw

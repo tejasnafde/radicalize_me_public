@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import discord
 import re
 import os
@@ -6,24 +9,28 @@ from aiohttp import web
 import traceback
 from discord.ext import commands
 from datetime import datetime
-from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator, ValidationError
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from google.generativeai.types.safety_types import HarmCategory, HarmBlockThreshold
+try:
+    from typing import Annotated  # Python 3.9+
+except ImportError:
+    from typing_extensions import Annotated  # Fallback for older versions
 from tools import (
     marxists_org_search,
     marxist_com_search,
     bannedthought_search,
     url_scraper,
+    reddit_search,
     allowed_domains
 )
 KEEP_ALIVE_CHANNEL_ID = 881890878308896778
 BOT_ID = None
 PING_INTERVAL = 600
-load_dotenv()
+
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 intents = discord.Intents.default()
@@ -51,7 +58,8 @@ async def keep_alive():
 tools = [marxists_org_search,
     marxist_com_search,
     bannedthought_search,
-    url_scraper]
+    url_scraper,
+    reddit_search]
 class Response(BaseModel):
     topic: str = Field(description="Main topic of analysis")
     summary: str = Field(description="Detailed Marxist analysis with citations")
@@ -95,6 +103,7 @@ You MUST:
    - marxist_com_search: Search Marxist.com articles
    - bannedthought_search: Search BannedThought.net
    - url_scraper: Fetch content from specific URLs
+   - reddit_search: Fetch relevant discussions and perspectives from specific subreddits.
 2. Explicitly list which tools were used in 'tools_used'
 
 Provide detailed 500-1000 word analyses with:
@@ -111,11 +120,16 @@ prompt = ChatPromptTemplate.from_messages([
 ]).partial(format_instructions=parser.get_format_instructions())
 
 
-agent = create_tool_calling_agent(
-    llm=llm,
-    prompt=prompt,
-    tools= tools
-)
+try:
+    agent = create_tool_calling_agent(
+        llm=llm,
+        prompt=prompt,
+        tools=tools
+    )
+except Exception as e:
+    print("Error binding tools:", e)
+    for tool in tools:
+        print(f"Tool Name: {tool.name}, Type: {type(tool)}")
 
 agent_executor = AgentExecutor(
     agent=agent,
