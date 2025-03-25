@@ -91,14 +91,14 @@ def is_quality_content(submission) -> bool:
             #not submission.author == "[deleted]" and
             not submission.removed_by_category)
 
-@backoff.on_exception(backoff.expo, praw.exceptions.APIException, max_tries=3)
+#@backoff.on_exception(backoff.expo, praw.exceptions.APIException, max_tries=3)
 @tool
-def reddit_search(query: str, subreddit: str = 'communism101') -> str:
+def reddit_search(query: str) -> str:
     """Search Marxist subreddits for contemporary discussions. 
     Available subreddits: communism101, socialism, marxism, communism, leftcommunism"""
     try:
         reddit = get_reddit_client()
-        subreddit = subreddit.lower()
+        subreddit = "communism101"
         if subreddit.lower() not in allowed_subreddits:
             return f"❌ Subreddit {subreddit} not in approved list"
             
