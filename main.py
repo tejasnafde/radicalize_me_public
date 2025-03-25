@@ -99,6 +99,7 @@ system_prompt = """You are a Marxist scholar restricted to these sources:
 
 You MUST:
 1. Use these tools for research:
+   - reddit_search: Fetch relevant discussions and perspectives from specific subreddits.
    - marxists_org_search: Search marxists.org archive
    - marxist_com_search: Search Marxist.com articles
    - bannedthought_search: Search BannedThought.net
@@ -199,6 +200,8 @@ async def on_message(message):
             async with ctx.typing():
                 result = await agent_executor.ainvoke({"query": query})
 
+                print(f"printing result from agent_executor {result}")
+                
                 if 'intermediate_steps' in result:
                     print("\nTool Usage:")
                     for step in result['intermediate_steps']:
