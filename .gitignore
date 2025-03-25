@@ -5,3 +5,4 @@ venv/
 praw.ini
 reddit_test.py
 venv_3_13/
+test/

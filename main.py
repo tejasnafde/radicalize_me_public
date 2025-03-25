@@ -15,7 +15,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from google.generativeai.types.safety_types import HarmCategory, HarmBlockThreshold
-from typing import Annotated
+try:
+    from typing import Annotated  # Python 3.9+
+except ImportError:
+    from typing_extensions import Annotated  # Fallback for older versions
 from tools import (
     marxists_org_search,
     marxist_com_search,
@@ -117,11 +120,16 @@ prompt = ChatPromptTemplate.from_messages([
 ]).partial(format_instructions=parser.get_format_instructions())
 
 
-agent = create_tool_calling_agent(
-    llm=llm,
-    prompt=prompt,
-    tools= tools
-)
+try:
+    agent = create_tool_calling_agent(
+        llm=llm,
+        prompt=prompt,
+        tools=tools
+    )
+except Exception as e:
+    print("Error binding tools:", e)
+    for tool in tools:
+        print(f"Tool Name: {tool.name}, Type: {type(tool)}")
 
 agent_executor = AgentExecutor(
     agent=agent,
