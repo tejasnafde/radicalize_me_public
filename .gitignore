@@ -2,3 +2,6 @@
 __pycache__/
 .venv
 venv/
+praw.ini
+reddit_test.py
+venv_3_13/

@@ -1,3 +1,4 @@
+from typing import Annotated
 from langchain.tools import tool
 from bs4 import BeautifulSoup
 import requests
@@ -5,15 +6,39 @@ from urllib.parse import quote_plus
 from typing import List
 import backoff
 import re
+import os
+import praw
+from praw.models import MoreComments
 
+
+
+# Load environment variables from main.py context
 allowed_domains = [
     'marxists.org',
     'marx2mao.com',
     'bannedthought.net',
     'marxist.com',
     'marxistphilosophy.org',
-    'communist.red'
+    'communist.red',
+    'reddit.com'
 ]
+
+def get_reddit_client():
+    """Initialize Reddit client AFTER .env loading"""
+    return praw.Reddit(
+        client_id=os.getenv('REDDIT_CLIENT_ID'),
+        client_secret=os.getenv('REDDIT_CLIENT_SECRET'),
+        username=os.getenv('REDDIT_USERNAME'),
+        password=os.getenv('REDDIT_PASSWORD'),
+        user_agent=os.getenv('REDDIT_USER_AGENT'),
+        ratelimit_seconds=300,
+        check_for_async=False
+    )
+
+allowed_subreddits = {
+    'communism101', 'socialism', 'marxism',
+    'communism', 'leftcommunism'
+}
 
 class MarxistScraper:
     """Enhanced Marxist document scraper with dialectical materialist parsing"""
@@ -40,7 +65,6 @@ class MarxistScraper:
         soup = BeautifulSoup(html, 'html.parser')
         results = []
         
-        # Search through the proper archive structure
         for result in soup.select('.archive-list-item'):
             title_elem = result.select_one('.title a')
             if title_elem and query.lower() in title_elem.text.lower():
@@ -51,10 +75,69 @@ class MarxistScraper:
                     'url': url,
                     'excerpt': self._clean_text(content)[:250]
                 })
-        return results[:5]  # Return top 5 relevant results
+        return results[:5]
 
     def _clean_text(self, text: str) -> str:
         return re.sub(r'\s+', ' ', text).strip()
+
+def format_reddit_url(subreddit: str, query: str) -> str:
+    """Generate Reddit search URL for reference"""
+    return f"https://www.reddit.com/r/{subreddit}/search/?q={quote_plus(query)}&restrict_sr=1"
+
+def is_quality_content(submission) -> bool:
+    """Dialectical filter for Reddit content"""
+    return (submission.score > 2 and 
+            #not submission.over_18 and
+            #not submission.author == "[deleted]" and
+            not submission.removed_by_category)
+
+@backoff.on_exception(backoff.expo, praw.exceptions.APIException, max_tries=3)
+@tool
+def reddit_search(query: str, subreddit: str = 'communism101') -> str:
+    """Search Marxist subreddits for contemporary discussions. 
+    Available subreddits: communism101, socialism, marxism, communism, leftcommunism"""
+    try:
+        reddit = get_reddit_client()
+        subreddit = subreddit.lower()
+        if subreddit.lower() not in allowed_subreddits:
+            return f"❌ Subreddit {subreddit} not in approved list"
+            
+        sr = reddit.subreddit(subreddit)
+        results = []
+        
+        for submission in sr.search(query, limit=5):
+            if not is_quality_content(submission):
+                continue
+                
+            content = f"""
+            **{submission.title}** (Score: {submission.score})
+            {submission.selftext[:500]}
+            URL: {submission.url}
+            """
+            results.append(content.strip())
+            
+
+            submission.comments.replace_more(limit=0)
+            for comment in submission.comments[:3]:
+                try:
+                    if (query.lower() in comment.body.lower() 
+                            and comment.score > 1 
+                            and not comment.removed):
+                        results.append(
+                            f"💬 Comment by u/{comment.author} (Score: {comment.score}):\n"
+                            f"{comment.body[:300]}"
+                        )
+                except AttributeError as e:
+                    print(f"Attribute error exception in submission.comments.replace_more {e}")
+                    continue
+                if len(results) >= 8:
+                    break
+                    
+        return ("🔴 Reddit Analysis:\n" + "\n\n".join(results)[:4000] 
+                or "No quality discussions found") + f"\n\nFull Search: {format_reddit_url(subreddit, query)}"
+        
+    except Exception as e:
+        return f"❌ Reddit search error: {str(e)}"
 
 @tool
 def marxists_org_search(query: str) -> str:
@@ -114,7 +197,6 @@ def url_scraper(url: str) -> str:
         html = scraper._fetch(url)
         soup = BeautifulSoup(html, 'html.parser')
         
-        # Extract main content using Marxist document structure
         content = soup.find('div', class_='marxist-content') or \
                  soup.find('article') or \
                  soup.find('main') or \
