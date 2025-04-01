@@ -94,8 +94,16 @@ def is_quality_content(submission) -> bool:
 #@backoff.on_exception(backoff.expo, praw.exceptions.APIException, max_tries=3)
 @tool
 def reddit_search(query: str) -> str:
-    """Search Marxist subreddits for contemporary discussions. 
-    Available subreddits: communism101, socialism, marxism, communism, leftcommunism"""
+    """Analyze contemporary proletarian perspectives on recent events. Use when:
+    - Seeking working class experiences with current class struggles
+    - Understanding modern applications of Marxist theory
+    - Finding debates about recent political developments (last 5 years)
+    - No suitable academic sources exist in other tools
+    
+    Input must be a specific question or topic phrase.
+    Output includes post titles, excerpts, votes, and comment highlights.
+    Available subreddits: communism101, socialism, marxism, communism, leftcommunism.
+    """
     try:
         reddit = get_reddit_client()
         subreddit = "communism101"
@@ -141,7 +149,15 @@ def reddit_search(query: str) -> str:
 
 @tool
 def marxists_org_search(query: str) -> str:
-    """Search marxists.org archive with proper Marxist source validation"""
+    """Access primary Marxist-Leninist sources. Use for:
+    - Foundational texts (Marx, Engels, Lenin, etc)
+    - Historical communist party documents
+    - Dialectical materialist analyses pre-2000
+    - Revolutionary history documentation
+    
+    Input: Specific philosophical concepts, historical events, or author names
+    Returns: Archival documents with metadata and excerpts
+    """
     scraper = MarxistScraper()
     try:
         search_url = f"https://www.marxists.org/archive/search.htm?query={quote_plus(query)}"
@@ -160,7 +176,15 @@ def marxists_org_search(query: str) -> str:
 
 @tool
 def marxist_com_search(query: str) -> str:
-    """Search International Marxist Tendency articles"""
+    """Modern Marxist analysis from IMT. Use when:
+    - Analyzing current events through Marxist lens
+    - Seeking Trotskyist perspectives
+    - Understanding recent labor struggles (post-2000)
+    - Comparing different Marxist tendencies
+    
+    Input: Current events or theoretical debates
+    Returns: Contemporary articles with publication dates
+    """
     scraper = MarxistScraper()
     try:
         search_url = f"https://www.marxist.com/search-results.htm?q={quote_plus(query)}"
@@ -181,7 +205,15 @@ def marxist_com_search(query: str) -> str:
 
 @tool
 def bannedthought_search(query: str) -> str:
-    """Search BannedThought.net using their actual search API"""
+    """Access documents from active revolutionary movements. Use for:
+    - Current communist party analyses
+    - Materials from prohibited revolutionary groups
+    - Non-Western Marxist perspectives
+    - Documents censored in bourgeois media
+    
+    Input: Names of revolutionary groups or suppressed topics
+    Returns: Primary source materials from active struggles
+    """
     scraper = MarxistScraper()
     try:
         search_url = f"https://www.bannedthought.net/api/search?q={quote_plus(query)}"
@@ -198,7 +230,14 @@ def bannedthought_search(query: str) -> str:
 
 @tool
 def url_scraper(url: str) -> str:
-    """Enhanced URL scraper with Marxist source validation"""
+    """Direct access to verified Marxist sources. Use when:
+    - Reference URL from another tool needs expansion
+    - Deep analysis of specific primary source required
+    - Contextualizing quoted material from other sources
+    
+    Input must be full URL from allowed domains
+    Returns: Raw content with dialectical materialist contextualization
+    """
     scraper = MarxistScraper()
     try:
         html = scraper._fetch(url)
