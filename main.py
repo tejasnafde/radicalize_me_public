@@ -16,23 +16,24 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from google.generativeai.types.safety_types import HarmCategory, HarmBlockThreshold
 try:
-    from typing import Annotated  # Python 3.9+
+    from typing import Annotated
 except ImportError:
-    from typing_extensions import Annotated  # Fallback for older versions
+    from typing_extensions import Annotated
 from tools import (
     marxists_org_search,
     marxist_com_search,
     bannedthought_search,
     url_scraper,
-    reddit_search,
-    allowed_domains
+    reddit_search
 )
+
 KEEP_ALIVE_CHANNEL_ID = 881890878308896778
 BOT_ID = None
 PING_INTERVAL = 600
 
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
@@ -55,35 +56,32 @@ async def keep_alive():
             print(f"Heartbeat error: {str(e)}")
             await asyncio.sleep(60)
 
-tools = [marxists_org_search,
+tools = [
+    marxists_org_search,
     marxist_com_search,
     bannedthought_search,
     url_scraper,
-    reddit_search]
+    reddit_search
+]
+
 class Response(BaseModel):
     topic: str = Field(description="Main topic of analysis")
     summary: str = Field(description="Detailed Marxist analysis with citations")
-    #sources: list[str] = Field(description="Verified source URLs")
     tools_used: list[str] = Field(
-        default_factory=list,
-        description="Tools employed in research (marxists_org_search, marxist_com_search, etc)")
+        min_items=3,
+        description="EXACT tool names used in research"
+    )
 
-    #@field_validator('sources')
+    @field_validator('tools_used')
     @classmethod
-    def validate_sources(cls, v):
-        allowed_domains = {
-            'marxists.org', 'marx2mao.com', 'bannedthought.net',
-            'marxist.com', 'marxistphilosophy.org', 'communist.red'
-        }
-        for url in v:
-            if not any(d in url for d in allowed_domains):
-                raise ValueError(f"Prohibited source: {url}")
+    def validate_tools(cls, v):
+        if len(v) < 3:
+            raise ValueError("REQUIRED: 3+ tools used")
         return v
-
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash",
-    temperature=0.7,
+    temperature=0.3,
     safety_settings={category: HarmBlockThreshold.BLOCK_NONE 
                     for category in HarmCategory},
     max_output_tokens=4000
@@ -91,36 +89,41 @@ llm = ChatGoogleGenerativeAI(
 parser = PydanticOutputParser(pydantic_object=Response)
 
 system_prompt = """
-        You are a dialectical materialist analysis engine. Your knowledge is strictly limited to what can be verified through these tools:
+You are a dialectical materialist analysis engine. Follow this protocol:
 
-        [Approved Sources]
-        1. marxists.org - Primary historical documents (pre-2000)
-        2. marxist.com - Contemporary Trotskyist analysis (post-2000)
-        3. bannedthought.net - Active revolutionary movements
-        4. communist.red - Modern Marxist theoretical developments
-        5. Reddit - Proletarian perspectives from r/communism101 and related subs
+1. TOOL MANDATE:
+   - REQUIRED: Use EXACTLY 3 tools minimum
+   - Required Tools for ALL Queries:
+     a) marxists_org_search (historical context)
+     b) marxist_com_search OR bannedthought_search (modern analysis)
+     c) reddit_search (proletarian perspective)
+   - url_scraper MANDATORY when citing specific URLs
 
-        [Strict Protocol]
-        1. NO PRIOR KNOWLEDGE: All assertions must derive from tool outputs
-        2. TOOL MANDATE: Minimum 3 tools must be used per analysis
-        3. CITATION FORMAT: [Source:ToolName] for each factual claim
-        4. CONTEMPORARY LIMITS: Events after 2023 require Reddit analysis
-        5. FAILURE MODE: If no sources found, state "Insufficient class analysis" 
+2. EXECUTION FLOW:
+   a) ALWAYS start with marxists_org_search
+   b) THEN modern analysis tool
+   c) THEN reddit_search
+   d) FINALLY url_scraper if sources cited
 
-        [Analysis Requirements]
-        1. Historical context from marxists_org_search
-        2. Modern context from marxist_com_search or bannedthought_search
-        3. Proletarian perspective from reddit_search
-        4. Direct source verification via url_scraper when quoting
+3. OUTPUT REQUIREMENTS:
+   - Each paragraph MUST contain [Source:ToolName] citations
+   - Tools used MUST match citations
+   - ABSOLUTELY NO unsourced claims
 
-        {format_instructions}
+4. FAILURE MODES:
+   - If ANY tool returns no results: STATE WHICH TOOL FAILED
+   - If <3 tools used: OUTPUT INVALID - RETRY ANALYSIS
+   - If post-2010 content: REQUIRE reddit_search + url_scraper
 
-        [Anti-Hallucination Measures]
-        - Uncited claims will be rejected
-        - Temporal mismatches forbidden (e.g., modern analysis of pre-2000 events)
-        - Non-Marxist terms must be critiqued using tool-derived material
-        - Statistical claims require direct tool citations
-        """
+{format_instructions}
+
+EXAMPLE WORKFLOW:
+1. "US labor strikes" => 
+   - marxists_org_search (Marx on labor)
+   - marxist_com_search (modern strike analysis)
+   - reddit_search (worker experiences)
+   - url_scraper (verify marxist.com article)
+"""
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", system_prompt),
@@ -128,26 +131,18 @@ prompt = ChatPromptTemplate.from_messages([
     ("placeholder", "{agent_scratchpad}")
 ]).partial(format_instructions=parser.get_format_instructions())
 
-
-try:
-    agent = create_tool_calling_agent(
-        llm=llm,
-        prompt=prompt,
-        tools=tools
-    )
-except Exception as e:
-    print("Error binding tools:", e)
-    for tool in tools:
-        print(f"Tool Name: {tool.name}, Type: {type(tool)}")
+agent = create_tool_calling_agent(
+    llm=llm,
+    prompt=prompt,
+    tools=tools
+)
 
 agent_executor = AgentExecutor(
     agent=agent,
-    tools=tools,  
+    tools=tools,
     verbose=True,
-    # handle_parsing_errors=True,
-    return_intermediate_steps = True
+    return_intermediate_steps=True
 )
-
 
 def split_response(response: str) -> list[str]:
     chunks = []
@@ -184,7 +179,6 @@ async def on_ready():
     print("-------------------------------")
     await web_server()
     client.loop.create_task(keep_alive())
-    
 
 @client.event
 async def on_message(message):
@@ -207,44 +201,28 @@ async def on_message(message):
             
             async with ctx.typing():
                 result = await agent_executor.ainvoke({"query": query})
-                print(f"printing result from agent_executor {result}")
-
-                if 'intermediate_steps' in result:
-                    print("\nTool Usage:")
-                    for step in result['intermediate_steps']:
-                        tool = step[0].tool
-                        input = step[0].tool_input
-                        output = step[1]
-                        print(f"- {tool}: {input}\n  Output: {output[:100]}...")
+                
+                if 'intermediate_steps' not in result or len(result['intermediate_steps']) < 3:
+                    result = await agent_executor.ainvoke({
+                        "query": f"REANALYZE USING 3+ TOOLS - Original query: {query}"
+                    })
 
                 raw_output = result['output']
                 parsed = parser.parse(raw_output)
 
-                if not parsed.tools_used:
-                    print(f"No tools used lmao ded")
-                    raise ValueError("No tools were used in the analysis")
-
-                # if not all(any(d in url for d in allowed_domains) for url in parsed.sources):
-                #     raise ValueError("Invalid sources detected")
-                response = (f"**{parsed.topic}**\n\n{parsed.summary}")
-                        #   f"**Sources:**\n" + "\n".join(parsed.sources))
-                
+                response = f"**{parsed.topic}**\n\n{parsed.summary}"
                 chunks = split_response(response)
 
-            try:
-                await loading_msg.delete()
-            except discord.HTTPException:
-                pass
-
+            await loading_msg.delete()
             for chunk in chunks:
                 if chunk.strip():
                     await ctx.send(chunk)
 
         except ValidationError as e:
-            await ctx.send(f"🚨 Dialectical materialist error: {str(e)}")
+            await ctx.send(f"🚨 Validation error: {str(e)}")
         except Exception as e:
             print(f"Error: {traceback.format_exc()}")
-            await ctx.send(f"💥 Revolutionary process interrupted: {str(e)}")
+            await ctx.send(f"💥 Analysis failed: {str(e)}")
         
         return
 
@@ -252,14 +230,12 @@ async def on_message(message):
 
 async def web_server():
     app = web.Application()
-    app.router.add_get("/", lambda _: web.Response(text="Marxist bot operational"))
+    app.router.add_get("/", lambda _: web.Response(text="Operational"))
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"⚒️ Web server active on port {port}")
-
-
+    print(f"Web server on port {port}")
 
 client.run(DISCORD_TOKEN)

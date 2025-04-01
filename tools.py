@@ -10,9 +10,6 @@ import os
 import praw
 from praw.models import MoreComments
 
-
-
-# Load environment variables from main.py context
 allowed_domains = [
     'marxists.org',
     'marx2mao.com',
@@ -24,7 +21,6 @@ allowed_domains = [
 ]
 
 def get_reddit_client():
-    """Initialize Reddit client AFTER .env loading"""
     return praw.Reddit(
         client_id=os.getenv('REDDIT_CLIENT_ID'),
         client_secret=os.getenv('REDDIT_CLIENT_SECRET'),
@@ -41,10 +37,8 @@ allowed_subreddits = {
 }
 
 class MarxistScraper:
-    """Enhanced Marxist document scraper with dialectical materialist parsing"""
-    
     def __init__(self):
-        self.headers = {'User-Agent': 'MarxistResearchBot/2.1 (+https://github.com/your/repo)'}
+        self.headers = {'User-Agent': 'MarxistResearchBot/2.1'}
         self.session = requests.Session()
         self.session.headers.update(self.headers)
 
@@ -61,7 +55,6 @@ class MarxistScraper:
         return response.text
 
     def _parse_marxists_org(self, html: str, query: str) -> List[dict]:
-        """Dialectical parser for marxists.org archive"""
         soup = BeautifulSoup(html, 'html.parser')
         results = []
         
@@ -75,40 +68,41 @@ class MarxistScraper:
                     'url': url,
                     'excerpt': self._clean_text(content)[:250]
                 })
-        return results[:5]
+        return results[:5] or [self._handle_empty_results('marxists_org_search', query)]
 
     def _clean_text(self, text: str) -> str:
         return re.sub(r'\s+', ' ', text).strip()
 
+    def _handle_empty_results(self, tool_name: str, query: str) -> dict:
+        return {
+            'title': f"No results from {tool_name}",
+            'url': "",
+            'excerpt': f"Query: {query} - Consider broadening terms or checking temporal relevance"
+        }
+
 def format_reddit_url(subreddit: str, query: str) -> str:
-    """Generate Reddit search URL for reference"""
     return f"https://www.reddit.com/r/{subreddit}/search/?q={quote_plus(query)}&restrict_sr=1"
 
 def is_quality_content(submission) -> bool:
-    """Dialectical filter for Reddit content"""
     return (submission.score > 2 and 
-            #not submission.over_18 and
-            #not submission.author == "[deleted]" and
+            not submission.over_18 and
+            not submission.author == "[deleted]" and
             not submission.removed_by_category)
 
-#@backoff.on_exception(backoff.expo, praw.exceptions.APIException, max_tries=3)
 @tool
 def reddit_search(query: str) -> str:
-    """Analyze contemporary proletarian perspectives on recent events. Use when:
-    - Seeking working class experiences with current class struggles
-    - Understanding modern applications of Marxist theory
-    - Finding debates about recent political developments (last 5 years)
-    - No suitable academic sources exist in other tools
+    """CONTEMPORARY WORKING CLASS PERSPECTIVES (POST-2020). MUST USE WHEN:
+    - Analyzing events after 2020
+    - Seeking first-hand proletarian experiences
+    - Validating modern applications of theory
+    - No pre-2000 sources exist on topic
     
-    Input must be a specific question or topic phrase.
-    Output includes post titles, excerpts, votes, and comment highlights.
-    Available subreddits: communism101, socialism, marxism, communism, leftcommunism.
-    """
+    Returns posts from r/communism101 and related subs with comment analysis."""
     try:
         reddit = get_reddit_client()
         subreddit = "communism101"
         if subreddit.lower() not in allowed_subreddits:
-            return f"❌ Subreddit {subreddit} not in approved list"
+            return f"❌ Subreddit {subreddit} not allowed"
             
         sr = reddit.subreddit(subreddit)
         results = []
@@ -123,21 +117,16 @@ def reddit_search(query: str) -> str:
             URL: {submission.url}
             """
             results.append(content.strip())
-            
 
             submission.comments.replace_more(limit=0)
             for comment in submission.comments[:3]:
-                try:
-                    if (query.lower() in comment.body.lower() 
-                            and comment.score > 1 
-                            and not comment.removed):
-                        results.append(
-                            f"💬 Comment by u/{comment.author} (Score: {comment.score}):\n"
-                            f"{comment.body[:300]}"
-                        )
-                except AttributeError as e:
-                    print(f"Attribute error exception in submission.comments.replace_more {e}")
-                    continue
+                if (query.lower() in comment.body.lower() 
+                        and comment.score > 1 
+                        and not comment.removed):
+                    results.append(
+                        f"💬 Comment by u/{comment.author} (Score: {comment.score}):\n"
+                        f"{comment.body[:300]}"
+                    )
                 if len(results) >= 8:
                     break
                     
@@ -145,26 +134,22 @@ def reddit_search(query: str) -> str:
                 or "No quality discussions found") + f"\n\nFull Search: {format_reddit_url(subreddit, query)}"
         
     except Exception as e:
-        return f"❌ Reddit search error: {str(e)}"
+        return f"❌ Reddit error: {str(e)}"
 
 @tool
 def marxists_org_search(query: str) -> str:
-    """Access primary Marxist-Leninist sources. Use for:
-    - Foundational texts (Marx, Engels, Lenin, etc)
-    - Historical communist party documents
-    - Dialectical materialist analyses pre-2000
-    - Revolutionary history documentation
+    """MUST USE FIRST FOR HISTORICAL CONTEXT. Primary Marxist-Leninist sources:
+    - Foundational texts (pre-2000)
+    - Historical party documents
+    - Revolutionary history
+    - Dialectical materialist analyses
     
-    Input: Specific philosophical concepts, historical events, or author names
-    Returns: Archival documents with metadata and excerpts
-    """
+    Returns archival documents with metadata."""
     scraper = MarxistScraper()
     try:
         search_url = f"https://www.marxists.org/archive/search.htm?query={quote_plus(query)}"
         html = scraper._fetch(search_url)
         results = scraper._parse_marxists_org(html, query)
-        if not results:
-            return "🔍 No results found in marxists.org archive"
             
         formatted = []
         for i, res in enumerate(results, 1):
@@ -172,19 +157,17 @@ def marxists_org_search(query: str) -> str:
         
         return "marxists.org Results:\n" + "\n\n".join(formatted)
     except Exception as e:
-        return f"❌ Failed to search marxists.org: {str(e)}"
+        return f"❌ marxists.org error: {str(e)}"
 
 @tool
 def marxist_com_search(query: str) -> str:
-    """Modern Marxist analysis from IMT. Use when:
-    - Analyzing current events through Marxist lens
-    - Seeking Trotskyist perspectives
-    - Understanding recent labor struggles (post-2000)
-    - Comparing different Marxist tendencies
+    """MODERN TROTSKYIST ANALYSIS (POST-2000). MUST USE FOR:
+    - Current events analysis
+    - Labor struggles
+    - Marxist tendency debates
+    - Imperialism analysis
     
-    Input: Current events or theoretical debates
-    Returns: Contemporary articles with publication dates
-    """
+    Returns contemporary articles with dates."""
     scraper = MarxistScraper()
     try:
         search_url = f"https://www.marxist.com/search-results.htm?q={quote_plus(query)}"
@@ -201,19 +184,17 @@ def marxist_com_search(query: str) -> str:
         
         return "Marxist.com Results:\n" + "\n\n".join(results[:3])
     except Exception as e:
-        return f"❌ Failed to search Marxist.com: {str(e)}"
+        return f"❌ Marxist.com error: {str(e)}"
 
 @tool
 def bannedthought_search(query: str) -> str:
-    """Access documents from active revolutionary movements. Use for:
-    - Current communist party analyses
-    - Materials from prohibited revolutionary groups
-    - Non-Western Marxist perspectives
-    - Documents censored in bourgeois media
+    """MUST USE FOR NON-WESTERN PERSPECTIVES. Includes:
+    - Active revolutionary movements
+    - Prohibited party materials
+    - Censored analyses
+    - Anti-imperialist struggles
     
-    Input: Names of revolutionary groups or suppressed topics
-    Returns: Primary source materials from active struggles
-    """
+    Returns primary sources from active conflicts."""
     scraper = MarxistScraper()
     try:
         search_url = f"https://www.bannedthought.net/api/search?q={quote_plus(query)}"
@@ -226,18 +207,16 @@ def bannedthought_search(query: str) -> str:
         
         return "BannedThought.net Results:\n" + "\n\n".join(results)
     except Exception as e:
-        return f"❌ Failed to search BannedThought: {str(e)}"
+        return f"❌ BannedThought error: {str(e)}"
 
 @tool
 def url_scraper(url: str) -> str:
-    """Direct access to verified Marxist sources. Use when:
-    - Reference URL from another tool needs expansion
-    - Deep analysis of specific primary source required
-    - Contextualizing quoted material from other sources
+    """MUST USE WHEN CITING SPECIFIC SOURCES. Validates:
+    - Direct quotes
+    - Statistical claims
+    - Historical references
     
-    Input must be full URL from allowed domains
-    Returns: Raw content with dialectical materialist contextualization
-    """
+    Returns verified content from provided URL."""
     scraper = MarxistScraper()
     try:
         html = scraper._fetch(url)
@@ -245,10 +224,9 @@ def url_scraper(url: str) -> str:
         
         content = soup.find('div', class_='marxist-content') or \
                  soup.find('article') or \
-                 soup.find('main') or \
-                 soup.body
+                 soup.find('main')
         
         clean_text = scraper._clean_text(content.text)
-        return f"Content from {url}:\n{clean_text[:3000]}..."
+        return f"Verified content from {url}:\n{clean_text[:3000]}..."
     except Exception as e:
-        return f"❌ Failed to scrape {url}: {str(e)}"
+        return f"❌ Scraping error: {str(e)}"
