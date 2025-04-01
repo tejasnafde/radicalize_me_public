@@ -199,9 +199,11 @@ async def on_message(message):
             
             async with ctx.typing():
                 result = await agent_executor.ainvoke({"query": query})
-
                 print(f"printing result from agent_executor {result}")
-                
+
+                if not parsed.tools_used:
+                    print(f"No tools used lmao ded")
+                    raise ValueError("No tools were used in the analysis")
                 if 'intermediate_steps' in result:
                     print("\nTool Usage:")
                     for step in result['intermediate_steps']:

@@ -147,7 +147,14 @@ def marxists_org_search(query: str) -> str:
         search_url = f"https://www.marxists.org/archive/search.htm?query={quote_plus(query)}"
         html = scraper._fetch(search_url)
         results = scraper._parse_marxists_org(html, query)
-        return "\n".join([f"{res['title']}\n{res['url']}\n{res['excerpt']}" for res in results])
+        if not results:
+            return "🔍 No results found in marxists.org archive"
+            
+        formatted = []
+        for i, res in enumerate(results, 1):
+            formatted.append(f"[Source {i}] {res['title']}\nURL: {res['url']}\n{res['excerpt']}")
+        
+        return "marxists.org Results:\n" + "\n\n".join(formatted)
     except Exception as e:
         return f"❌ Failed to search marxists.org: {str(e)}"
 
