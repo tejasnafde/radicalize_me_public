@@ -201,9 +201,6 @@ async def on_message(message):
                 result = await agent_executor.ainvoke({"query": query})
                 print(f"printing result from agent_executor {result}")
 
-                if not parsed.tools_used:
-                    print(f"No tools used lmao ded")
-                    raise ValueError("No tools were used in the analysis")
                 if 'intermediate_steps' in result:
                     print("\nTool Usage:")
                     for step in result['intermediate_steps']:
@@ -214,6 +211,10 @@ async def on_message(message):
 
                 raw_output = result['output']
                 parsed = parser.parse(raw_output)
+                
+                if not parsed.tools_used:
+                    print(f"No tools used lmao ded")
+                    raise ValueError("No tools were used in the analysis")
 
                 # if not all(any(d in url for d in allowed_domains) for url in parsed.sources):
                 #     raise ValueError("Invalid sources detected")
