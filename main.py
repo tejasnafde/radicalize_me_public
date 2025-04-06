@@ -10,7 +10,7 @@ import traceback
 from discord.ext import commands
 from datetime import datetime
 from pydantic import BaseModel, Field, field_validator, ValidationError
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain.agents import create_tool_calling_agent, AgentExecutor
