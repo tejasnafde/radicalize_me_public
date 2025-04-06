@@ -21,7 +21,6 @@ from crawl4ai.models import CrawlResult
 
 from langchain_community.document_loaders import UnstructuredMarkdownLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-import chromadb
 from chromadb.config import Settings
 
 
@@ -42,20 +41,36 @@ PING_INTERVAL = 600
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 
 # Add after environment variable loading
+# Replace the WebContentVectorDB class with this corrected version
 class WebContentVectorDB:
     def __init__(self):
+        from chromadb.utils.embedding_functions import EmbeddingFunction
+        import chromadb
+        
+        class GeminiEmbeddingFunction(EmbeddingFunction):
+            def __init__(self):
+                self.embeddings = GoogleGenerativeAIEmbeddings(
+                    model="models/embedding-001"
+                )
+            
+            def __call__(self, input: list[str]) -> list[list[float]]:
+                return self.embeddings.embed_documents(input)
+
         self.embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
         self.client = chromadb.PersistentClient(
             path="./marxist_db", 
             settings=Settings(anonymized_telemetry=False)
         )
+        self.embedding_function = GeminiEmbeddingFunction()
+        
         self.collection = self.client.get_or_create_collection(
             name="web_content",
-            embedding_function=self._embed_function
+            embedding_function=self.embedding_function,
+            metadata={"hnsw:space": "cosine"}
         )
-    
-    def _embed_function(self, texts: list[str]) -> list[list[float]]:
-        return self.embeddings.embed_documents(texts)
+
+    def _normalize_url(self, url):
+        return url.replace("https://", "").replace("www.", "").replace("/", "_")
 
     def add_documents(self, results: list[CrawlResult]):
         text_splitter = RecursiveCharacterTextSplitter(
@@ -65,16 +80,14 @@ class WebContentVectorDB:
         )
         
         for result in results:
-            if not result.markdown_v2:
+            # Use modern markdown field
+            if not hasattr(result.markdown, 'fit_markdown'):
                 continue
                 
-            docs = UnstructuredMarkdownLoader(
-                file_path=tempfile.NamedTemporaryFile(
-                    mode="w", 
-                    suffix=".md", 
-                    delete=False
-                ).write(result.markdown_v2.fit_markdown)
-            ).load()
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+                f.write(result.markdown.fit_markdown)
+                f.flush()
+                docs = UnstructuredMarkdownLoader(f.name).load()
             
             splits = text_splitter.split_documents(docs)
             normalized_url = self._normalize_url(result.url)
@@ -84,9 +97,6 @@ class WebContentVectorDB:
                 metadatas=[{"source": result.url} for _ in splits],
                 ids=[f"{normalized_url}_{i}" for i in range(len(splits))]
             )
-
-    def _normalize_url(self, url):
-        return url.replace("https://", "").replace("www.", "").replace("/", "_")
 
 vector_db = WebContentVectorDB()
 
@@ -128,12 +138,22 @@ class Response(BaseModel):
         min_items=3,
         description="EXACT tool names used in research"
     )
+    sources: list[str] = Field(
+        min_items=3,
+        description="ACTUAL URLs used in research"
+    )
 
     @field_validator('tools_used')
     @classmethod
     def validate_tools(cls, v):
         if len(v) < 3:
             raise ValueError("REQUIRED: 3+ tools used")
+        return v
+    @field_validator('sources')
+    @classmethod
+    def validate_sources(cls, v):
+        if any("Requires primary source verification" in s for s in v):
+            raise ValueError("Placeholder sources not allowed")
         return v
 
 llm = ChatGoogleGenerativeAI(
@@ -172,6 +192,10 @@ EVERY paragraph must cite [Source:Tool]
 Web results MUST be verified with url_scraper
 Combine historical materialism with contemporary analysis
 Absolute verification of statistical claims
+EVERY factual claim MUST cite EXACT URL from sources list
+Summary MUST contain [Source: URL] after each claim
+Sources list MUST contain ACTUAL URLs from tool outputs
+If no URL matches claim, state "Requires primary source verification"
 
 FAILSAFES:
 If web_search fails: Use marxist_com_search + bannedthought_search
@@ -262,24 +286,39 @@ async def on_message(message):
             loading_msg = await ctx.send("⚙️ Analyzing class contradictions...")
             
             async with ctx.typing():
-                # Store web results first
-                web_results = await web_search.ainvoke(query)
-                vector_db.add_documents(web_results)
+                try:
+                    crawl_results = await web_search.ainvoke(query)
+                    
+                    valid_results = [
+                        r for r in crawl_results 
+                        if isinstance(r, CrawlResult) and hasattr(r.markdown, 'fit_markdown')
+                    ]
+                    vector_db.add_documents(valid_results)
+                    
+                except Exception as e:
+                    print(f"Error storing web content: {str(e)}")
                 
                 result = await agent_executor.ainvoke({"query": query})
 
                 print("\n" + "="*40 + " INITIAL ANALYSIS STEPS " + "="*40)
+                all_urls = []
                 if 'intermediate_steps' in result:
-                    for i, step in enumerate(result['intermediate_steps'], 1):
-                        tool_name = step[0].tool
-                        tool_input = step[0].tool_input
-                        tool_output = step[1][:500] + "..." if isinstance(step[1], str) and len(step[1]) > 500 else step[1]
-                        print(f"\nSTEP {i}: {tool_name.upper()}")
-                        print(f"INPUT:\n{tool_input}")
-                        print(f"OUTPUT:\n{tool_output}")
-                        print("-"*80)
-                else:
-                    print("No intermediate steps recorded in initial analysis")
+                    for step in result['intermediate_steps']:
+                        tool_output = step[1]
+                        
+                        # Collect URLs from different tool formats
+                        if isinstance(tool_output, list):  # Web search results
+                            all_urls.extend([r.url for r in tool_output if hasattr(r, 'url')])
+                        elif isinstance(tool_output, dict) and 'urls' in tool_output:
+                            all_urls.extend(tool_output['urls'])
+                        
+                        # Add detailed logging
+                        print(f"\n🛠️ TOOL {step[0].tool.upper()} USED:")
+                        print(f"INPUT: {step[0].tool_input}")
+                        if hasattr(tool_output, 'url'):
+                            print(f"URLS: {[r.url for r in tool_output]}")
+                        elif isinstance(tool_output, dict):
+                            print(f"URLS: {tool_output.get('urls', [])}")
                 
                 if 'intermediate_steps' not in result or len(result['intermediate_steps']) < 3:
                     print("\n" + "!"*40 + " INITIAL ANALYSIS INSUFFICIENT - RETRYING " + "!"*40)
@@ -301,7 +340,23 @@ async def on_message(message):
                     print("No intermediate steps recorded in retry analysis")
                     
                 raw_output = result['output']
-                parsed = parser.parse(raw_output)
+                try:
+                    parsed = parser.parse(raw_output)
+                    
+                    # Verify cited URLs were actually accessed
+                    missing_urls = [url for url in parsed.sources if url not in all_urls]
+                    if missing_urls:
+                        print(f"Cited URLs not actually scraped: {missing_urls}")
+                        
+                    # Add sources to response
+                    response = (f"**{parsed.topic}**\n\n{parsed.summary}\n\n"
+                            f"**Verified Sources:**\n" + "\n".join(f"- {u}" for u in parsed.sources[:3]))
+                    
+                except ValidationError as e:
+                    # Retry with actual URLs
+                    retry_prompt = f"REVISE WITH ACTUAL SOURCES: {raw_output}\n\nACTUAL URLS: {all_urls}"
+                    raw_output = await llm.ainvoke(retry_prompt)
+                    parsed = parser.parse(raw_output)
 
                 print("\n" + "="*40 + " FINAL VALIDATION " + "="*40)
                 print(f"Tools Used: {parsed.tools_used}")
