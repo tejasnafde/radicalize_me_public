@@ -31,7 +31,6 @@ KEEP_ALIVE_CHANNEL_ID = 881890878308896778
 BOT_ID = None
 PING_INTERVAL = 600
 
-GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 
 intents = discord.Intents.default()
