@@ -17,10 +17,6 @@ from langchain.agents import create_tool_calling_agent, AgentExecutor
 from google.generativeai.types.safety_types import HarmCategory, HarmBlockThreshold
 
 import tempfile
-from urllib.parse import urlparse
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
-from crawl4ai.content_filter_strategy import BM25ContentFilter
-from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.models import CrawlResult
 from duckduckgo_search import DDGS
 from langchain_community.document_loaders import UnstructuredMarkdownLoader
