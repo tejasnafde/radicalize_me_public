@@ -9,6 +9,8 @@ import re
 import os
 import praw
 from praw.models import MoreComments
+from crawl4ai.models import CrawlResult
+from duckduckgo_search import DDGS
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.content_filter_strategy import BM25ContentFilter
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator

@@ -18,7 +18,7 @@ from google.generativeai.types.safety_types import HarmCategory, HarmBlockThresh
 
 import tempfile
 from crawl4ai.models import CrawlResult
-from duckduckgo_search import DDGS
+
 from langchain_community.document_loaders import UnstructuredMarkdownLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import chromadb
