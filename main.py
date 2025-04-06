@@ -109,6 +109,7 @@ You are a dialectical materialist analysis engine. Follow this protocol:
    - Each paragraph MUST contain [Source:ToolName] citations
    - Tools used MUST match citations
    - ABSOLUTELY NO unsourced claims
+   - Output must be as exhaustive as possible, keeping the length around 500-1000 words, but DO NOT lengthen the text if you cannot find sufficient relevant information.
 
 4. FAILURE MODES:
    - If ANY tool returns no results: STATE WHICH TOOL FAILED
@@ -201,15 +202,47 @@ async def on_message(message):
             
             async with ctx.typing():
                 result = await agent_executor.ainvoke({"query": query})
+
+                print("\n" + "="*40 + " INITIAL ANALYSIS STEPS " + "="*40)
+                if 'intermediate_steps' in result:
+                    for i, step in enumerate(result['intermediate_steps'], 1):
+                        tool_name = step[0].tool
+                        tool_input = step[0].tool_input
+                        tool_output = step[1][:500] + "..." if isinstance(step[1], str) and len(step[1]) > 500 else step[1]
+                        print(f"\nSTEP {i}: {tool_name.upper()}")
+                        print(f"INPUT:\n{tool_input}")
+                        print(f"OUTPUT:\n{tool_output}")
+                        print("-"*80)
+                else:
+                    print("No intermediate steps recorded in initial analysis")
                 
                 if 'intermediate_steps' not in result or len(result['intermediate_steps']) < 3:
+                    print("\n" + "!"*40 + " INITIAL ANALYSIS INSUFFICIENT - RETRYING " + "!"*40)
                     result = await agent_executor.ainvoke({
                         "query": f"REANALYZE USING 3+ TOOLS - Original query: {query}"
                     })
 
+                print("\n" + "="*40 + " RETRY ANALYSIS STEPS " + "="*40)
+                if 'intermediate_steps' in result:
+                    for i, step in enumerate(result['intermediate_steps'], 1):
+                        tool_name = step[0].tool
+                        tool_input = step[0].tool_input
+                        tool_output = step[1][:500] + "..." if isinstance(step[1], str) and len(step[1]) > 500 else step[1]
+                        print(f"\nRETRY STEP {i}: {tool_name.upper()}")
+                        print(f"INPUT:\n{tool_input}")
+                        print(f"OUTPUT:\n{tool_output}")
+                        print("-"*80)
+                else:
+                    print("No intermediate steps recorded in retry analysis")
+                    
                 raw_output = result['output']
                 parsed = parser.parse(raw_output)
 
+                print("\n" + "="*40 + " FINAL VALIDATION " + "="*40)
+                print(f"Tools Used: {parsed.tools_used}")
+                print(f"Output Length: {len(raw_output)} characters")
+                print(f"Validation Successful: {parsed}")
+                
                 response = f"**{parsed.topic}**\n\n{parsed.summary}"
                 chunks = split_response(response)
 
