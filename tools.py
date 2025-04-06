@@ -1,10 +1,8 @@
-from typing import Annotated
+from typing import Annotated, List
 from langchain.tools import tool
 from bs4 import BeautifulSoup
 import requests
 from urllib.parse import quote_plus
-from typing import List
-import backoff
 import re
 import os
 import praw
@@ -14,6 +12,7 @@ from duckduckgo_search import DDGS
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.content_filter_strategy import BM25ContentFilter
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+import backoff
 
 allowed_domains = [
     'marxists.org',
@@ -159,8 +158,14 @@ def marxists_org_search(query: str) -> str:
         formatted = []
         for i, res in enumerate(results, 1):
             formatted.append(f"[Source {i}] {res['title']}\nURL: {res['url']}\n{res['excerpt']}")
-        
-        return "marxists.org Results:\n" + "\n\n".join(formatted)
+        print(f"\n📚 MARXISTS.ORG URLs USED:")
+        for res in results:
+            print(f" - {res['url']}")
+        return {
+            "content": "\n\n".join(formatted),
+            "urls": [res['url'] for res in results]
+        }
+        # return "marxists.org Results:\n" + "\n\n".join(formatted)
     except Exception as e:
         return f"❌ marxists.org error: {str(e)}"
 
@@ -235,50 +240,36 @@ def url_scraper(url: str) -> str:
         return f"Verified content from {url}:\n{clean_text[:3000]}..."
     except Exception as e:
         return f"❌ Scraping error: {str(e)}"
-    
 
 @tool
 async def web_search(query: str) -> str:
     """Search allowed domains for contemporary analysis. MUST USE FIRST FOR ALL POST-2000 TOPICS."""
     try:
-        urls = get_web_urls(query)
+        # Step 1: Get filtered URLs
+        site_filters = " OR ".join(f"site:{d}" for d in allowed_domains)
+        search_results = DDGS().text(f"{query} ({site_filters})", max_results=5)
+        urls = [r['href'] for r in search_results if any(d in r['href'] for d in allowed_domains)]
+        
         if not urls:
             return "No relevant URLs found in allowed domains"
-            
-        results = await crawl_webpages(urls, query)
-        return format_web_results(results)
+
+        # Step 2: Crawl webpages
+        config = CrawlerRunConfig(
+            markdown_generator=DefaultMarkdownGenerator(
+                content_filter=BM25ContentFilter(user_query=query)
+            ),
+            excluded_tags=["nav", "footer", "header", "form", "img", "a"],
+            only_text=True,
+            cache_mode=CacheMode.BYPASS
+        )
+        
+        async with AsyncWebCrawler(config=BrowserConfig(headless=True)) as crawler:
+            results = await crawler.arun_many(urls, config=config)  # Return raw CrawlResults
+
+        print(f"\n🔍 WEB SEARCH URLs CRAWLED ({len(results)}):")
+        for result in results:
+            print(f" - {result.url}")
+        return results
+    
     except Exception as e:
         return f"Web search error: {str(e)}"
-
-def get_web_urls(search_term: str) -> list[str]:
-    allowed_domains = [
-        'marxists.org', 'marxist.com', 'bannedthought.net',
-        'marxistphilosophy.org', 'communist.red'
-    ]
-    site_filters = " OR ".join(f"site:{domain}" for domain in allowed_domains)
-    return [
-        result["href"] for result in DDGS().text(
-            f"{search_term} ({site_filters})", 
-            max_results=5
-        )
-    ]
-
-async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:
-    config = CrawlerRunConfig(
-        markdown_generator=DefaultMarkdownGenerator(
-            content_filter=BM25ContentFilter(user_query=prompt)
-        ),
-        excluded_tags=["nav", "footer", "header", "form", "img", "a"],
-        only_text=True,
-        cache_mode=CacheMode.BYPASS
-    )
-    
-    async with AsyncWebCrawler(config=BrowserConfig(headless=True)) as crawler:
-        return await crawler.arun_many(urls, config=config)
-
-def format_web_results(results: list[CrawlResult]) -> str:
-    output = []
-    for result in results:
-        if result.markdown_v2:
-            output.append(f"**{result.title}**\n{result.markdown_v2.fit_markdown[:1000]}...")
-    return "\n\n".join(output)[:4000]
