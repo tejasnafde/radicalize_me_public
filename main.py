@@ -15,11 +15,23 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from google.generativeai.types.safety_types import HarmCategory, HarmBlockThreshold
-try:
-    from typing import Annotated
-except ImportError:
-    from typing_extensions import Annotated
+
+import tempfile
+from urllib.parse import urlparse
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+from crawl4ai.content_filter_strategy import BM25ContentFilter
+from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+from crawl4ai.models import CrawlResult
+from duckduckgo_search import DDGS
+from langchain_community.document_loaders import UnstructuredMarkdownLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+import chromadb
+from chromadb.config import Settings
+
+
+
 from tools import (
+    web_search,
     marxists_org_search,
     marxist_com_search,
     bannedthought_search,
@@ -32,6 +44,56 @@ BOT_ID = None
 PING_INTERVAL = 600
 
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+
+# Add after environment variable loading
+class WebContentVectorDB:
+    def __init__(self):
+        self.embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        self.client = chromadb.PersistentClient(
+            path="./marxist_db", 
+            settings=Settings(anonymized_telemetry=False)
+        )
+        self.collection = self.client.get_or_create_collection(
+            name="web_content",
+            embedding_function=self._embed_function
+        )
+    
+    def _embed_function(self, texts: list[str]) -> list[list[float]]:
+        return self.embeddings.embed_documents(texts)
+
+    def add_documents(self, results: list[CrawlResult]):
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=400,
+            chunk_overlap=100,
+            separators=["\n\n", "\n", ".", "?", "!", " ", ""],
+        )
+        
+        for result in results:
+            if not result.markdown_v2:
+                continue
+                
+            docs = UnstructuredMarkdownLoader(
+                file_path=tempfile.NamedTemporaryFile(
+                    mode="w", 
+                    suffix=".md", 
+                    delete=False
+                ).write(result.markdown_v2.fit_markdown)
+            ).load()
+            
+            splits = text_splitter.split_documents(docs)
+            normalized_url = self._normalize_url(result.url)
+            
+            self.collection.upsert(
+                documents=[split.page_content for split in splits],
+                metadatas=[{"source": result.url} for _ in splits],
+                ids=[f"{normalized_url}_{i}" for i in range(len(splits))]
+            )
+
+    def _normalize_url(self, url):
+        return url.replace("https://", "").replace("www.", "").replace("/", "_")
+
+vector_db = WebContentVectorDB()
+
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -200,6 +262,10 @@ async def on_message(message):
             loading_msg = await ctx.send("⚙️ Analyzing class contradictions...")
             
             async with ctx.typing():
+                # Store web results first
+                web_results = await web_search.ainvoke(query)
+                vector_db.add_documents(web_results)
+                
                 result = await agent_executor.ainvoke({"query": query})
 
                 print("\n" + "="*40 + " INITIAL ANALYSIS STEPS " + "="*40)

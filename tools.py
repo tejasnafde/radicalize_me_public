@@ -230,3 +230,50 @@ def url_scraper(url: str) -> str:
         return f"Verified content from {url}:\n{clean_text[:3000]}..."
     except Exception as e:
         return f"❌ Scraping error: {str(e)}"
+    
+
+@tool
+async def web_search(query: str) -> str:
+    """Search allowed domains for contemporary analysis. MUST USE FIRST FOR ALL POST-2000 TOPICS."""
+    try:
+        urls = get_web_urls(query)
+        if not urls:
+            return "No relevant URLs found in allowed domains"
+            
+        results = await crawl_webpages(urls, query)
+        return format_web_results(results)
+    except Exception as e:
+        return f"Web search error: {str(e)}"
+
+def get_web_urls(search_term: str) -> list[str]:
+    allowed_domains = [
+        'marxists.org', 'marxist.com', 'bannedthought.net',
+        'marxistphilosophy.org', 'communist.red'
+    ]
+    site_filters = " OR ".join(f"site:{domain}" for domain in allowed_domains)
+    return [
+        result["href"] for result in DDGS().text(
+            f"{search_term} ({site_filters})", 
+            max_results=5
+        )
+    ]
+
+async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:
+    config = CrawlerRunConfig(
+        markdown_generator=DefaultMarkdownGenerator(
+            content_filter=BM25ContentFilter(user_query=prompt)
+        ),
+        excluded_tags=["nav", "footer", "header", "form", "img", "a"],
+        only_text=True,
+        cache_mode=CacheMode.BYPASS
+    )
+    
+    async with AsyncWebCrawler(config=BrowserConfig(headless=True)) as crawler:
+        return await crawler.arun_many(urls, config=config)
+
+def format_web_results(results: list[CrawlResult]) -> str:
+    output = []
+    for result in results:
+        if result.markdown_v2:
+            output.append(f"**{result.title}**\n{result.markdown_v2.fit_markdown[:1000]}...")
+    return "\n\n".join(output)[:4000]
