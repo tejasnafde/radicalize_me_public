@@ -4,15 +4,27 @@ from langchain.tools import tool
 from bs4 import BeautifulSoup
 import requests
 from urllib.parse import quote_plus
-from typing import List, Dict
+from typing import List, Dict, Optional
 import backoff
 import re
 import os
 import praw
+from functools import lru_cache
 from praw.models import MoreComments
 from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
 from pydantic import BaseModel, Field
+from tenacity import retry, stop_after_attempt, wait_exponential
 
+
+@retry(stop=stop_after_attempt(3), 
+       wait=wait_exponential(multiplier=1, min=4, max=10),
+       reraise=True)
+async def safe_ai_call(invoke_func, *args, **kwargs):
+    try:
+        return await invoke_func(*args, **kwargs)
+    except Exception as e:
+        print(f"API Error: {str(e)}")
+        raise
 
 allowed_domains = [
     'marxists.org',
@@ -24,6 +36,7 @@ allowed_domains = [
     'reddit.com'
 ]
 
+@lru_cache(maxsize=100)
 def get_reddit_client():
     return praw.Reddit(
         client_id=os.getenv('REDDIT_CLIENT_ID'),
@@ -39,8 +52,17 @@ class ToolOutput(BaseModel):
     content: str = Field(description="Processed content from the tool")
     sources: List[str] = Field(description="List of source URLs used")
 
+class RestrictedWebSearchInput(BaseModel):
+    query: str = Field(description="Search query to look up")
 
-@tool(args_schema=BaseModel, return_schema=ToolOutput)
+class UrlScraperInput(BaseModel):
+    url: str = Field(description="URL to scrape content from")
+class RedditSearchInput(BaseModel):
+    query: str = Field(description="Search query for Reddit")
+    time_filter: str = Field("year", description="Time filter for search", enum=["hour", "day", "week", "month", "year"])
+
+@tool(args_schema=RestrictedWebSearchInput)
+@retry
 def restricted_web_search(query: str) -> Dict:
     """Performs web search restricted to allowed domains using DuckDuckGo.
     Use for initial research phase to gather relevant documents.
@@ -56,7 +78,7 @@ def restricted_web_search(query: str) -> Dict:
             {"title": r["title"], "url": r["link"], "snippet": r["snippet"]}
             for r in results if any(d in r["link"] for d in allowed_domains)
         ]
-        
+        print(f"18apr debug {filtered=}")
         return ToolOutput(
             content=json.dumps(filtered),
             sources=[r["url"] for r in filtered]
@@ -127,50 +149,47 @@ def is_quality_content(submission) -> bool:
             not submission.author == "[deleted]" and
             not submission.removed_by_category)
 
-class RedditInput(BaseModel):
-    query: str
-    time_filter: str = Field("year", enum=["hour", "day", "week", "month", "year"])
-
-@tool(args_schema=RedditInput, return_schema=ToolOutput)
+@tool(args_schema=RedditSearchInput)
+@retry
 def reddit_search(query: str, time_filter: str = "year") -> Dict:
-    """Searches Marxist subreddits for contemporary working-class perspectives.
-    Focus on post-2020 discussions when analyzing current events.
-    """
+    """Searches Marxist subreddits for contemporary working-class perspectives."""
     try:
-        reddit = praw.Reddit(
-            client_id=os.getenv('REDDIT_CLIENT_ID'),
-            client_secret=os.getenv('REDDIT_CLIENT_SECRET'),
-            user_agent=os.getenv('REDDIT_USER_AGENT')
-        )
-        
+        reddit = get_reddit_client()
         results = []
         sources = []
-        subreddits = ["communism101", "socialism", "marxism"]
         
-        for sub in subreddits:
-            submissions = reddit.subreddit(sub).search(
-                query,
-                limit=3,
-                time_filter=time_filter,
-                sort="relevance"
-            )
+        for sub in allowed_subreddits:
+            try:
+                submissions = reddit.subreddit(sub).search(
+                    query,
+                    limit=3,
+                    time_filter=time_filter,
+                    sort="relevance"
+                )
+                
+                for post in submissions:
+                    # Updated removal check
+                    if hasattr(post, 'removed_by_category') or not hasattr(post, 'selftext') or post.selftext in ('[removed]', '[deleted]'):
+                        continue
+                    
+                    content = f"**{post.title}**\nScore: {post.score}\n{post.selftext[:500]}"
+                    results.append(content)
+                    sources.append(f"https://reddit.com{post.permalink}")
+                    
+                    # Handle comments more carefully
+                    post.comments.replace_more(limit=0)  # Don't load MoreComments
+                    for comment in post.comments.list()[:3]:  # Top 3 comments
+                        if hasattr(comment, 'body') and comment.body.strip() and not getattr(comment, 'removed', False):
+                            author = getattr(comment, 'author', '[deleted]')
+                            results.append(f"Comment by {author}: {comment.body[:300]}")
+                            sources.append(f"https://reddit.com{comment.permalink}")
             
-            for post in submissions:
-                if post.removed or post.selftext == "[removed]":
-                    continue
-                
-                content = f"**{post.title}**\nScore: {post.score}\n{post.selftext[:500]}"
-                results.append(content)
-                sources.append(f"https://reddit.com{post.permalink}")
-                
-                post.comments.replace_more(limit=2)
-                for comment in post.comments[:3]:
-                    if not comment.removed and comment.body.strip():
-                        results.append(f"Comment by {comment.author}: {comment.body[:300]}")
-                        sources.append(f"https://reddit.com{comment.permalink}")
+            except Exception as e:
+                print(f"Error searching subreddit {sub}: {str(e)}")
+                continue
         
         return ToolOutput(
-            content="\n\n".join(results)[:4000],
+            content="\n\n".join(results)[:4000] if results else "No relevant Reddit discussions found",
             sources=sources
         ).dict()
     
@@ -182,7 +201,8 @@ def reddit_search(query: str, time_filter: str = "year") -> Dict:
 
 
 
-@tool(args_schema=BaseModel, return_schema=ToolOutput)
+@tool(args_schema=UrlScraperInput)
+@retry
 def url_scraper(url: str) -> Dict:
     """Scrapes and processes content from a single URL. 
     Verify URL belongs to allowed domains before scraping.
