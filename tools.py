@@ -4,12 +4,15 @@ from langchain.tools import tool
 from bs4 import BeautifulSoup
 import requests
 from urllib.parse import quote_plus
-from typing import List
+from typing import List, Dict
 import backoff
 import re
 import os
 import praw
 from praw.models import MoreComments
+from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
+from pydantic import BaseModel, Field
+
 
 allowed_domains = [
     'marxists.org',
@@ -31,6 +34,40 @@ def get_reddit_client():
         ratelimit_seconds=300,
         check_for_async=False
     )
+
+class ToolOutput(BaseModel):
+    content: str = Field(description="Processed content from the tool")
+    sources: List[str] = Field(description="List of source URLs used")
+
+
+@tool(args_schema=BaseModel, return_schema=ToolOutput)
+def restricted_web_search(query: str) -> Dict:
+    """Performs web search restricted to allowed domains using DuckDuckGo.
+    Use for initial research phase to gather relevant documents.
+    """
+    try:
+        site_filter = " OR ".join([f"site:{d}" for d in allowed_domains])
+        enhanced_query = f"{query} {site_filter}"
+        
+        search = DuckDuckGoSearchAPIWrapper(max_results=5)
+        results = search.results(enhanced_query, 5)
+        
+        filtered = [
+            {"title": r["title"], "url": r["link"], "snippet": r["snippet"]}
+            for r in results if any(d in r["link"] for d in allowed_domains)
+        ]
+        
+        return ToolOutput(
+            content=json.dumps(filtered),
+            sources=[r["url"] for r in filtered]
+        ).dict()
+    
+    except Exception as e:
+        return ToolOutput(
+            content=f"Search error: {str(e)}",
+            sources=[]
+        ).dict()
+    
 
 allowed_subreddits = {
     'communism101', 'socialism', 'marxism',
@@ -90,174 +127,87 @@ def is_quality_content(submission) -> bool:
             not submission.author == "[deleted]" and
             not submission.removed_by_category)
 
-@tool
-def reddit_search(query: str) -> str:
-    """
-    CONTEMPORARY WORKING CLASS PERSPECTIVES (POST-2020). MUST USE WHEN:
-    - Analyzing events after 2020
-    - Seeking first-hand proletarian experiences
-    - Validating modern applications of theory
-    - No pre-2000 sources exist on topic
+class RedditInput(BaseModel):
+    query: str
+    time_filter: str = Field("year", enum=["hour", "day", "week", "month", "year"])
 
-    Returns posts from r/communism101 and related subs with comment analysis.
+@tool(args_schema=RedditInput, return_schema=ToolOutput)
+def reddit_search(query: str, time_filter: str = "year") -> Dict:
+    """Searches Marxist subreddits for contemporary working-class perspectives.
+    Focus on post-2020 discussions when analyzing current events.
     """
     try:
-        reddit = get_reddit_client()
-        subreddit = "communism101"
-        if subreddit.lower() not in allowed_subreddits:
-            raise ValueError(f"Subreddit {subreddit} not allowed")
-            
-        sr = reddit.subreddit(subreddit)
-        results = []
+        reddit = praw.Reddit(
+            client_id=os.getenv('REDDIT_CLIENT_ID'),
+            client_secret=os.getenv('REDDIT_CLIENT_SECRET'),
+            user_agent=os.getenv('REDDIT_USER_AGENT')
+        )
         
-        for submission in sr.search(query, limit=5):
-            if not is_quality_content(submission):
-                continue
+        results = []
+        sources = []
+        subreddits = ["communism101", "socialism", "marxism"]
+        
+        for sub in subreddits:
+            submissions = reddit.subreddit(sub).search(
+                query,
+                limit=3,
+                time_filter=time_filter,
+                sort="relevance"
+            )
+            
+            for post in submissions:
+                if post.removed or post.selftext == "[removed]":
+                    continue
                 
-            content = f"""
-            **{submission.title}** (Score: {submission.score})
-            {submission.selftext[:500]}
-            URL: {submission.url}
-            """
-            results.append(content.strip())
-
-            submission.comments.replace_more(limit=0)
-            for comment in submission.comments[:3]:
-                if (query.lower() in comment.body.lower() 
-                        and comment.score > 1 
-                        and not comment.removed):
-                    results.append(
-                        f"💬 Comment by u/{comment.author} (Score: {comment.score}):\n"
-                        f"{comment.body[:300]}"
-                    )
-                if len(results) >= 8:
-                    break
+                content = f"**{post.title}**\nScore: {post.score}\n{post.selftext[:500]}"
+                results.append(content)
+                sources.append(f"https://reddit.com{post.permalink}")
+                
+                post.comments.replace_more(limit=2)
+                for comment in post.comments[:3]:
+                    if not comment.removed and comment.body.strip():
+                        results.append(f"Comment by {comment.author}: {comment.body[:300]}")
+                        sources.append(f"https://reddit.com{comment.permalink}")
         
-        final_content = ("🔴 Reddit Analysis:\n" + "\n\n".join(results))[:4000] or "No quality discussions found"
-        final_content += f"\n\nFull Search: {format_reddit_url(subreddit, query)}"
-        output = {"tool": "reddit_search", "result": final_content, "error": None}
-        return json.dumps(output)
-        
+        return ToolOutput(
+            content="\n\n".join(results)[:4000],
+            sources=sources
+        ).dict()
+    
     except Exception as e:
-        error_output = {"tool": "reddit_search", "result": "", "error": str(e)}
-        return json.dumps(error_output)
+        return ToolOutput(
+            content=f"Reddit error: {str(e)}",
+            sources=[]
+        ).dict()
 
-@tool
-def marxists_org_search(query: str) -> str:
-    """
-    MUST USE FIRST FOR HISTORICAL CONTEXT. Primary Marxist-Leninist sources:
-    - Foundational texts (pre-2000)
-    - Historical party documents
-    - Revolutionary history
-    - Dialectical materialist analyses
 
-    Returns archival documents with metadata.
+
+@tool(args_schema=BaseModel, return_schema=ToolOutput)
+def url_scraper(url: str) -> Dict:
+    """Scrapes and processes content from a single URL. 
+    Verify URL belongs to allowed domains before scraping.
     """
-    scraper = MarxistScraper()
     try:
-        search_url = f"https://www.marxists.org/archive/search.htm?query={quote_plus(query)}"
-        html = scraper._fetch(search_url)
-        results = scraper._parse_marxists_org(html, query)
+        if not any(d in url for d in allowed_domains):
+            raise ValueError("Prohibited domain")
             
-        formatted = []
-        for i, res in enumerate(results, 1):
-            formatted.append(f"[Source {i}] {res['title']}\nURL: {res['url']}\n{res['excerpt']}")
-        
-        final_content = "marxists.org Results:\n" + "\n\n".join(formatted)
-        output = {"tool": "marxists_org_search", "result": final_content, "error": None}
-        return json.dumps(output)
-        
-    except Exception as e:
-        error_output = {"tool": "marxists_org_search", "result": "", "error": str(e)}
-        return json.dumps(error_output)
-
-@tool
-def marxist_com_search(query: str) -> str:
-    """
-    MODERN TROTSKYIST ANALYSIS (POST-2000). MUST USE FOR:
-    - Current events analysis
-    - Labor struggles
-    - Marxist tendency debates
-    - Imperialism analysis
-
-    Returns contemporary articles with dates.
-    """
-    scraper = MarxistScraper()
-    try:
-        search_url = f"https://www.marxist.com/search-results.htm?q={quote_plus(query)}"
-        html = scraper._fetch(search_url)
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        results = []
-        for article in soup.select('.search-result-item'):
-            title = article.select_one('h3 a').text.strip()
-            url = article.select_one('h3 a')['href']
-            date = article.select_one('.date').text.strip()
-            excerpt = article.select_one('.excerpt').text.strip()
-            results.append(f"{date} - {title}\n{url}\n{excerpt}")
-        
-        final_content = "Marxist.com Results:\n" + "\n\n".join(results[:3])
-        output = {"tool": "marxist_com_search", "result": final_content, "error": None}
-        return json.dumps(output)
-        
-    except Exception as e:
-        error_output = {"tool": "marxist_com_search", "result": "", "error": str(e)}
-        return json.dumps(error_output)
-
-@tool
-def bannedthought_search(query: str) -> str:
-    """
-    MUST USE FOR NON-WESTERN PERSPECTIVES. Includes:
-    - Active revolutionary movements
-    - Prohibited party materials
-    - Censored analyses
-    - Anti-imperialist struggles
-
-    Returns primary sources from active conflicts.
-    """
-    scraper = MarxistScraper()
-    try:
-        search_url = f"https://www.bannedthought.net/api/search?q={quote_plus(query)}"
-        response = scraper.session.get(search_url)
+        response = requests.get(url, timeout=15, headers={'User-Agent': 'ResearchBot/2.0'})
         response.raise_for_status()
         
-        results = []
-        for item in response.json().get('results', [])[:3]:
-            results.append(f"{item['title']}\n{item['url']}\n{item['excerpt']}")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        main_content = soup.find('article') or soup.find('main') or soup.body
         
-        final_content = "BannedThought.net Results:\n" + "\n\n".join(results)
-        output = {"tool": "bannedthought_search", "result": final_content, "error": None}
-        return json.dumps(output)
+        # Clean content
+        text = main_content.get_text(separator='\n', strip=True)
+        text = re.sub(r'\n{3,}', '\n\n', text)[:3000]  # Truncate to fit context
         
-    except Exception as e:
-        error_output = {"tool": "bannedthought_search", "result": "", "error": str(e)}
-        return json.dumps(error_output)
-
-@tool
-def url_scraper(url: str) -> str:
-    """
-    MUST USE WHEN CITING SPECIFIC SOURCES. Validates:
-    - Direct quotes
-    - Statistical claims
-    - Historical references
-
-    Returns verified content from provided URL.
-    """
-    scraper = MarxistScraper()
-    try:
-        html = scraper._fetch(url)
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        content = soup.find('div', class_='marxist-content') or \
-                  soup.find('article') or \
-                  soup.find('main')
-        if not content:
-            raise ValueError("No suitable content container found")
-        clean_text = scraper._clean_text(content.text)
-        final_content = f"Verified content from {url}:\n{clean_text[:3000]}..."
-        output = {"tool": "url_scraper", "result": final_content, "error": None}
-        return json.dumps(output)
+        return ToolOutput(
+            content=text,
+            sources=[url]
+        ).dict()
         
     except Exception as e:
-        error_output = {"tool": "url_scraper", "result": "", "error": str(e)}
-        return json.dumps(error_output)
+        return ToolOutput(
+            content=f"Scraping error: {str(e)}",
+            sources=[]
+        ).dict()
