@@ -6,3 +6,4 @@ praw.ini
 reddit_test.py
 venv_3_13/
 test/
+.DS_Store

@@ -13,7 +13,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, field_validator, ValidationError
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.output_parsers import PydanticOutputParser, StrOutputParser
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from google.generativeai.types.safety_types import HarmCategory, HarmBlockThreshold
 try:
@@ -22,7 +22,7 @@ except ImportError:
     from typing_extensions import Annotated
 
 
-from tools import restricted_web_search, url_scraper, reddit_search
+from tools import restricted_web_search, url_scraper, reddit_search, safe_ai_call
 research_tools = [restricted_web_search, url_scraper]
 analysis_tools = [url_scraper, reddit_search]
 
@@ -72,9 +72,6 @@ async def keep_alive():
             await asyncio.sleep(60)
 
 tools = [
-    marxists_org_search,
-    marxist_com_search,
-    bannedthought_search,
     url_scraper,
     reddit_search
 ]
@@ -142,7 +139,7 @@ parser = PydanticOutputParser(pydantic_object=Response)
 # """
 
 analysis_prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a Marxist analyst. Use provided research context and tools.
+    ("system", """You are a Marxist analyst. Use provided research context and tools.
         
     RESEARCH CONTEXT:
     {context}
@@ -150,9 +147,10 @@ analysis_prompt = ChatPromptTemplate.from_messages([
     ANALYSIS PROTOCOL:
     1. Cross-reference sources
     2. Apply historical materialism
-    3. Cite sources with [Source#] notation"""),
-        ("human", "{query}")
-    ])
+    3. Cite sources with [Source#] notation
+    4. Use the agent scratchpad for intermediate steps: {agent_scratchpad}"""),
+    ("human", "{query}")
+])
 
 analysis_llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-pro",
@@ -162,7 +160,10 @@ analysis_llm = ChatGoogleGenerativeAI(
     max_output_tokens=4000
 )
 
-analysis_agent = create_tool_calling_agent(analysis_llm, analysis_prompt, analysis_tools)
+print(f"Type of analysis_prompt: {type(analysis_prompt)}")
+print(f"Type of analysis_tools: {type(analysis_tools)}")
+
+analysis_agent = create_tool_calling_agent(analysis_llm, analysis_tools, analysis_prompt)
 agent_executor = AgentExecutor(agent=analysis_agent, tools=analysis_tools, verbose=True)
 # prompt = ChatPromptTemplate.from_messages([
 #     ("system", system_prompt),
@@ -237,66 +238,68 @@ async def on_message(message):
 
         try:
             loading_msg = await ctx.send("⚙️ Analyzing class contradictions...")
-            optimized_query = await research_chain.ainvoke({"query": query})
-            search_results = await restricted_web_search.ainvoke(optimized_query)
-
+            try:
+                optimized_query = await asyncio.wait_for(
+                    research_chain.ainvoke({"query": query}),
+                    timeout=30
+                )
+                search_results = await asyncio.wait_for(
+                    restricted_web_search.ainvoke({"query": optimized_query}),
+                    timeout=45
+                )
+            except asyncio.TimeoutError:
+                await loading_msg.edit(content="⌛ Research phase timed out, proceeding with limited context")
+                search_results = {"content": "[]"}
+            
+            # Handle the search results properly
             context = []
-            for url in json.loads(search_results["content"])[:5]:
-                scraped = await url_scraper.ainvoke(url["url"])
-                context.append({
-                    "source": url["url"],
-                    "content": scraped["content"]
-                })
-            response = await agent_executor.ainvoke({
-                "query": query,
-                "context": json.dumps(context)
-            })
-            # async with ctx.typing():
-            #     result = await agent_executor.ainvoke({"query": query})
-
-            #     print("\n" + "="*40 + " INITIAL ANALYSIS STEPS " + "="*40)
-            #     if 'intermediate_steps' in result:
-            #         for i, step in enumerate(result['intermediate_steps'], 1):
-            #             tool_name = step[0].tool
-            #             tool_input = step[0].tool_input
-            #             tool_output = step[1][:500] + "..." if isinstance(step[1], str) and len(step[1]) > 500 else step[1]
-            #             print(f"\nSTEP {i}: {tool_name.upper()}")
-            #             print(f"INPUT:\n{tool_input}")
-            #             print(f"OUTPUT:\n{tool_output}")
-            #             print("-"*80)
-            #     else:
-            #         print("No intermediate steps recorded in initial analysis")
+            try:
+                # First check if we got a ToolOutput object
+                if hasattr(search_results, 'content'):
+                    content = search_results.content
+                else:
+                    content = search_results.get("content", "")
                 
-            #     if 'intermediate_steps' not in result or len(result['intermediate_steps']) < 3:
-            #         print("\n" + "!"*40 + " INITIAL ANALYSIS INSUFFICIENT - RETRYING " + "!"*40)
-            #         result = await agent_executor.ainvoke({
-            #             "query": f"REANALYZE USING 3+ TOOLS - Original query: {query}"
-            #         })
+                # Try to parse JSON if it's a string
+                if isinstance(content, str):
+                    try:
+                        results_data = json.loads(content)
+                    except json.JSONDecodeError:
+                        results_data = content  # fallback to raw content if not JSON
+                else:
+                    results_data = content
 
-            #     print("\n" + "="*40 + " RETRY ANALYSIS STEPS " + "="*40)
-            #     if 'intermediate_steps' in result:
-            #         for i, step in enumerate(result['intermediate_steps'], 1):
-            #             tool_name = step[0].tool
-            #             tool_input = step[0].tool_input
-            #             tool_output = step[1][:500] + "..." if isinstance(step[1], str) and len(step[1]) > 500 else step[1]
-            #             print(f"\nRETRY STEP {i}: {tool_name.upper()}")
-            #             print(f"INPUT:\n{tool_input}")
-            #             print(f"OUTPUT:\n{tool_output}")
-            #             print("-"*80)
-            #     else:
-            #         print("No intermediate steps recorded in retry analysis")
-                    
-            #     raw_output = result['output']
-            #     parsed = parser.parse(raw_output)
+                # Process results whether they came from JSON or direct content
+                if isinstance(results_data, list):
+                    for item in results_data[:5]:
+                        if isinstance(item, dict) and 'url' in item:
+                            try:
+                                scraped = await url_scraper.ainvoke({"url": item["url"]})
+                                context.append({
+                                    "source": item["url"],
+                                    "content": scraped.get("content", "") if isinstance(scraped, dict) else str(scraped)
+                                })
+                            except Exception as e:
+                                print(f"Error scraping {item['url']}: {str(e)}")
+                                continue
+            except Exception as e:
+                print(f"Error processing search results: {str(e)}")
+                await ctx.send("⚠️ Error processing search results, proceeding with limited context")
 
-            #     print("\n" + "="*40 + " FINAL VALIDATION " + "="*40)
-            #     print(f"Tools Used: {parsed.tools_used}")
-            #     print(f"Output Length: {len(raw_output)} characters")
-            #     print(f"Validation Successful: {parsed}")
-                
-            #     response = f"**{parsed.topic}**\n\n{parsed.summary}"
-            chunks = split_response(response)
-
+            response = await safe_ai_call(
+                agent_executor.ainvoke,
+                {
+                    "query": query,
+                    "context": json.dumps(context) if context else "No context available"
+                }
+            )
+            # Handle the response properly
+            if isinstance(response, dict):
+                output = response.get('output', 'No analysis generated')
+            else:
+                output = str(response)
+            
+            chunks = split_response(output)
             await loading_msg.delete()
             for chunk in chunks:
                 if chunk.strip():
