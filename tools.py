@@ -1,3 +1,4 @@
+import json
 from typing import Annotated
 from langchain.tools import tool
 from bs4 import BeautifulSoup
@@ -91,18 +92,20 @@ def is_quality_content(submission) -> bool:
 
 @tool
 def reddit_search(query: str) -> str:
-    """CONTEMPORARY WORKING CLASS PERSPECTIVES (POST-2020). MUST USE WHEN:
+    """
+    CONTEMPORARY WORKING CLASS PERSPECTIVES (POST-2020). MUST USE WHEN:
     - Analyzing events after 2020
     - Seeking first-hand proletarian experiences
     - Validating modern applications of theory
     - No pre-2000 sources exist on topic
-    
-    Returns posts from r/communism101 and related subs with comment analysis."""
+
+    Returns posts from r/communism101 and related subs with comment analysis.
+    """
     try:
         reddit = get_reddit_client()
         subreddit = "communism101"
         if subreddit.lower() not in allowed_subreddits:
-            return f"❌ Subreddit {subreddit} not allowed"
+            raise ValueError(f"Subreddit {subreddit} not allowed")
             
         sr = reddit.subreddit(subreddit)
         results = []
@@ -129,22 +132,27 @@ def reddit_search(query: str) -> str:
                     )
                 if len(results) >= 8:
                     break
-                    
-        return ("🔴 Reddit Analysis:\n" + "\n\n".join(results)[:4000] 
-                or "No quality discussions found") + f"\n\nFull Search: {format_reddit_url(subreddit, query)}"
+        
+        final_content = ("🔴 Reddit Analysis:\n" + "\n\n".join(results))[:4000] or "No quality discussions found"
+        final_content += f"\n\nFull Search: {format_reddit_url(subreddit, query)}"
+        output = {"tool": "reddit_search", "result": final_content, "error": None}
+        return json.dumps(output)
         
     except Exception as e:
-        return f"❌ Reddit error: {str(e)}"
+        error_output = {"tool": "reddit_search", "result": "", "error": str(e)}
+        return json.dumps(error_output)
 
 @tool
 def marxists_org_search(query: str) -> str:
-    """MUST USE FIRST FOR HISTORICAL CONTEXT. Primary Marxist-Leninist sources:
+    """
+    MUST USE FIRST FOR HISTORICAL CONTEXT. Primary Marxist-Leninist sources:
     - Foundational texts (pre-2000)
     - Historical party documents
     - Revolutionary history
     - Dialectical materialist analyses
-    
-    Returns archival documents with metadata."""
+
+    Returns archival documents with metadata.
+    """
     scraper = MarxistScraper()
     try:
         search_url = f"https://www.marxists.org/archive/search.htm?query={quote_plus(query)}"
@@ -155,19 +163,25 @@ def marxists_org_search(query: str) -> str:
         for i, res in enumerate(results, 1):
             formatted.append(f"[Source {i}] {res['title']}\nURL: {res['url']}\n{res['excerpt']}")
         
-        return "marxists.org Results:\n" + "\n\n".join(formatted)
+        final_content = "marxists.org Results:\n" + "\n\n".join(formatted)
+        output = {"tool": "marxists_org_search", "result": final_content, "error": None}
+        return json.dumps(output)
+        
     except Exception as e:
-        return f"❌ marxists.org error: {str(e)}"
+        error_output = {"tool": "marxists_org_search", "result": "", "error": str(e)}
+        return json.dumps(error_output)
 
 @tool
 def marxist_com_search(query: str) -> str:
-    """MODERN TROTSKYIST ANALYSIS (POST-2000). MUST USE FOR:
+    """
+    MODERN TROTSKYIST ANALYSIS (POST-2000). MUST USE FOR:
     - Current events analysis
     - Labor struggles
     - Marxist tendency debates
     - Imperialism analysis
-    
-    Returns contemporary articles with dates."""
+
+    Returns contemporary articles with dates.
+    """
     scraper = MarxistScraper()
     try:
         search_url = f"https://www.marxist.com/search-results.htm?q={quote_plus(query)}"
@@ -182,19 +196,25 @@ def marxist_com_search(query: str) -> str:
             excerpt = article.select_one('.excerpt').text.strip()
             results.append(f"{date} - {title}\n{url}\n{excerpt}")
         
-        return "Marxist.com Results:\n" + "\n\n".join(results[:3])
+        final_content = "Marxist.com Results:\n" + "\n\n".join(results[:3])
+        output = {"tool": "marxist_com_search", "result": final_content, "error": None}
+        return json.dumps(output)
+        
     except Exception as e:
-        return f"❌ Marxist.com error: {str(e)}"
+        error_output = {"tool": "marxist_com_search", "result": "", "error": str(e)}
+        return json.dumps(error_output)
 
 @tool
 def bannedthought_search(query: str) -> str:
-    """MUST USE FOR NON-WESTERN PERSPECTIVES. Includes:
+    """
+    MUST USE FOR NON-WESTERN PERSPECTIVES. Includes:
     - Active revolutionary movements
     - Prohibited party materials
     - Censored analyses
     - Anti-imperialist struggles
-    
-    Returns primary sources from active conflicts."""
+
+    Returns primary sources from active conflicts.
+    """
     scraper = MarxistScraper()
     try:
         search_url = f"https://www.bannedthought.net/api/search?q={quote_plus(query)}"
@@ -202,31 +222,42 @@ def bannedthought_search(query: str) -> str:
         response.raise_for_status()
         
         results = []
-        for item in response.json()['results'][:3]:
+        for item in response.json().get('results', [])[:3]:
             results.append(f"{item['title']}\n{item['url']}\n{item['excerpt']}")
         
-        return "BannedThought.net Results:\n" + "\n\n".join(results)
+        final_content = "BannedThought.net Results:\n" + "\n\n".join(results)
+        output = {"tool": "bannedthought_search", "result": final_content, "error": None}
+        return json.dumps(output)
+        
     except Exception as e:
-        return f"❌ BannedThought error: {str(e)}"
+        error_output = {"tool": "bannedthought_search", "result": "", "error": str(e)}
+        return json.dumps(error_output)
 
 @tool
 def url_scraper(url: str) -> str:
-    """MUST USE WHEN CITING SPECIFIC SOURCES. Validates:
+    """
+    MUST USE WHEN CITING SPECIFIC SOURCES. Validates:
     - Direct quotes
     - Statistical claims
     - Historical references
-    
-    Returns verified content from provided URL."""
+
+    Returns verified content from provided URL.
+    """
     scraper = MarxistScraper()
     try:
         html = scraper._fetch(url)
         soup = BeautifulSoup(html, 'html.parser')
         
         content = soup.find('div', class_='marxist-content') or \
-                 soup.find('article') or \
-                 soup.find('main')
-        
+                  soup.find('article') or \
+                  soup.find('main')
+        if not content:
+            raise ValueError("No suitable content container found")
         clean_text = scraper._clean_text(content.text)
-        return f"Verified content from {url}:\n{clean_text[:3000]}..."
+        final_content = f"Verified content from {url}:\n{clean_text[:3000]}..."
+        output = {"tool": "url_scraper", "result": final_content, "error": None}
+        return json.dumps(output)
+        
     except Exception as e:
-        return f"❌ Scraping error: {str(e)}"
+        error_output = {"tool": "url_scraper", "result": "", "error": str(e)}
+        return json.dumps(error_output)
