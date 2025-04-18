@@ -4,6 +4,7 @@ load_dotenv()
 import discord
 import re
 import os
+import json
 import asyncio
 from aiohttp import web
 import traceback
@@ -19,13 +20,28 @@ try:
     from typing import Annotated
 except ImportError:
     from typing_extensions import Annotated
-from tools import (
-    marxists_org_search,
-    marxist_com_search,
-    bannedthought_search,
-    url_scraper,
-    reddit_search
+
+
+from tools import restricted_web_search, url_scraper, reddit_search
+research_tools = [restricted_web_search, url_scraper]
+analysis_tools = [url_scraper, reddit_search]
+
+research_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a research assistant. Optimize search queries and gather sources.
+1. Analyze user query for key Marxist concepts
+2. Expand terms using dialectical relationships
+3. Output enhanced search query"""),
+    ("human", "{query}")
+])
+
+research_llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
+    temperature=0.2,
+    safety_settings={category: HarmBlockThreshold.BLOCK_NONE 
+                    for category in HarmCategory}
 )
+
+research_chain = research_prompt | research_llm | StrOutputParser()
 
 KEEP_ALIVE_CHANNEL_ID = 881890878308896778
 BOT_ID = None
@@ -87,62 +103,85 @@ llm = ChatGoogleGenerativeAI(
 )
 parser = PydanticOutputParser(pydantic_object=Response)
 
-system_prompt = """
-You are a dialectical materialist analysis engine. Follow this protocol:
+# system_prompt = """
+# You are a dialectical materialist analysis engine. Follow this protocol:
 
-1. TOOL MANDATE:
-   - REQUIRED: Use EXACTLY 3 tools minimum
-   - Required Tools for ALL Queries:
-     a) marxists_org_search (historical context)
-     b) marxist_com_search OR bannedthought_search (modern analysis)
-     c) reddit_search (proletarian perspective)
-   - url_scraper MANDATORY when citing specific URLs
+# 1. TOOL MANDATE:
+#    - REQUIRED: Use EXACTLY 3 tools minimum
+#    - Required Tools for ALL Queries:
+#      a) marxists_org_search (historical context)
+#      b) marxist_com_search OR bannedthought_search (modern analysis)
+#      c) reddit_search (proletarian perspective)
+#    - url_scraper MANDATORY when citing specific URLs
 
-2. EXECUTION FLOW:
-   a) ALWAYS start with marxists_org_search
-   b) THEN modern analysis tool
-   c) THEN reddit_search
-   d) FINALLY url_scraper if sources cited
+# 2. EXECUTION FLOW:
+#    a) ALWAYS start with marxists_org_search
+#    b) THEN modern analysis tool
+#    c) THEN reddit_search
+#    d) FINALLY url_scraper if sources cited
 
-3. OUTPUT REQUIREMENTS:
-   - Each paragraph MUST contain [Source:ToolName] citations
-   - Tools used MUST match citations
-   - ABSOLUTELY NO unsourced claims
-   - Output must be as exhaustive as possible, keeping the length around 500-1000 words, but DO NOT lengthen the text if you cannot find sufficient relevant information.
+# 3. OUTPUT REQUIREMENTS:
+#    - Each paragraph MUST contain [Source:ToolName] citations
+#    - Tools used MUST match citations
+#    - ABSOLUTELY NO unsourced claims
+#    - Output must be as exhaustive as possible, keeping the length around 500-1000 words, but DO NOT lengthen the text if you cannot find sufficient relevant information.
 
-4. FAILURE MODES:
-   - If ANY tool returns no results: STATE WHICH TOOL FAILED
-   - If <3 tools used: OUTPUT INVALID - RETRY ANALYSIS
-   - If post-2010 content: REQUIRE reddit_search + url_scraper
+# 4. FAILURE MODES:
+#    - If ANY tool returns no results: STATE WHICH TOOL FAILED
+#    - If <3 tools used: OUTPUT INVALID - RETRY ANALYSIS
+#    - If post-2010 content: REQUIRE reddit_search + url_scraper
 
-{format_instructions}
+# {format_instructions}
 
-EXAMPLE WORKFLOW:
-1. "US labor strikes" => 
-   - marxists_org_search (Marx on labor)
-   - marxist_com_search (modern strike analysis)
-   - reddit_search (worker experiences)
-   - url_scraper (verify marxist.com article)
-"""
+# EXAMPLE WORKFLOW:
+# 1. "US labor strikes" => 
+#    - marxists_org_search (Marx on labor)
+#    - marxist_com_search (modern strike analysis)
+#    - reddit_search (worker experiences)
+#    - url_scraper (verify marxist.com article)
+# """
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", system_prompt),
-    ("human", "{query}"),
-    ("placeholder", "{agent_scratchpad}")
-]).partial(format_instructions=parser.get_format_instructions())
+analysis_prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are a Marxist analyst. Use provided research context and tools.
+        
+    RESEARCH CONTEXT:
+    {context}
 
-agent = create_tool_calling_agent(
-    llm=llm,
-    prompt=prompt,
-    tools=tools
+    ANALYSIS PROTOCOL:
+    1. Cross-reference sources
+    2. Apply historical materialism
+    3. Cite sources with [Source#] notation"""),
+        ("human", "{query}")
+    ])
+
+analysis_llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-pro",
+    temperature=0.3,
+    safety_settings={category: HarmBlockThreshold.BLOCK_NONE 
+                    for category in HarmCategory},
+    max_output_tokens=4000
 )
 
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    verbose=True,
-    return_intermediate_steps=True
-)
+analysis_agent = create_tool_calling_agent(analysis_llm, analysis_prompt, analysis_tools)
+agent_executor = AgentExecutor(agent=analysis_agent, tools=analysis_tools, verbose=True)
+# prompt = ChatPromptTemplate.from_messages([
+#     ("system", system_prompt),
+#     ("human", "{query}"),
+#     ("placeholder", "{agent_scratchpad}")
+# ]).partial(format_instructions=parser.get_format_instructions())
+
+# agent = create_tool_calling_agent(
+#     llm=llm,
+#     prompt=prompt,
+#     tools=tools
+# )
+
+# agent_executor = AgentExecutor(
+#     agent=agent,
+#     tools=tools,
+#     verbose=True,
+#     return_intermediate_steps=True
+# )
 
 def split_response(response: str) -> list[str]:
     chunks = []
@@ -198,52 +237,65 @@ async def on_message(message):
 
         try:
             loading_msg = await ctx.send("⚙️ Analyzing class contradictions...")
-            
-            async with ctx.typing():
-                result = await agent_executor.ainvoke({"query": query})
+            optimized_query = await research_chain.ainvoke({"query": query})
+            search_results = await restricted_web_search.ainvoke(optimized_query)
 
-                print("\n" + "="*40 + " INITIAL ANALYSIS STEPS " + "="*40)
-                if 'intermediate_steps' in result:
-                    for i, step in enumerate(result['intermediate_steps'], 1):
-                        tool_name = step[0].tool
-                        tool_input = step[0].tool_input
-                        tool_output = step[1][:500] + "..." if isinstance(step[1], str) and len(step[1]) > 500 else step[1]
-                        print(f"\nSTEP {i}: {tool_name.upper()}")
-                        print(f"INPUT:\n{tool_input}")
-                        print(f"OUTPUT:\n{tool_output}")
-                        print("-"*80)
-                else:
-                    print("No intermediate steps recorded in initial analysis")
+            context = []
+            for url in json.loads(search_results["content"])[:5]:
+                scraped = await url_scraper.ainvoke(url["url"])
+                context.append({
+                    "source": url["url"],
+                    "content": scraped["content"]
+                })
+            response = await agent_executor.ainvoke({
+                "query": query,
+                "context": json.dumps(context)
+            })
+            # async with ctx.typing():
+            #     result = await agent_executor.ainvoke({"query": query})
+
+            #     print("\n" + "="*40 + " INITIAL ANALYSIS STEPS " + "="*40)
+            #     if 'intermediate_steps' in result:
+            #         for i, step in enumerate(result['intermediate_steps'], 1):
+            #             tool_name = step[0].tool
+            #             tool_input = step[0].tool_input
+            #             tool_output = step[1][:500] + "..." if isinstance(step[1], str) and len(step[1]) > 500 else step[1]
+            #             print(f"\nSTEP {i}: {tool_name.upper()}")
+            #             print(f"INPUT:\n{tool_input}")
+            #             print(f"OUTPUT:\n{tool_output}")
+            #             print("-"*80)
+            #     else:
+            #         print("No intermediate steps recorded in initial analysis")
                 
-                if 'intermediate_steps' not in result or len(result['intermediate_steps']) < 3:
-                    print("\n" + "!"*40 + " INITIAL ANALYSIS INSUFFICIENT - RETRYING " + "!"*40)
-                    result = await agent_executor.ainvoke({
-                        "query": f"REANALYZE USING 3+ TOOLS - Original query: {query}"
-                    })
+            #     if 'intermediate_steps' not in result or len(result['intermediate_steps']) < 3:
+            #         print("\n" + "!"*40 + " INITIAL ANALYSIS INSUFFICIENT - RETRYING " + "!"*40)
+            #         result = await agent_executor.ainvoke({
+            #             "query": f"REANALYZE USING 3+ TOOLS - Original query: {query}"
+            #         })
 
-                print("\n" + "="*40 + " RETRY ANALYSIS STEPS " + "="*40)
-                if 'intermediate_steps' in result:
-                    for i, step in enumerate(result['intermediate_steps'], 1):
-                        tool_name = step[0].tool
-                        tool_input = step[0].tool_input
-                        tool_output = step[1][:500] + "..." if isinstance(step[1], str) and len(step[1]) > 500 else step[1]
-                        print(f"\nRETRY STEP {i}: {tool_name.upper()}")
-                        print(f"INPUT:\n{tool_input}")
-                        print(f"OUTPUT:\n{tool_output}")
-                        print("-"*80)
-                else:
-                    print("No intermediate steps recorded in retry analysis")
+            #     print("\n" + "="*40 + " RETRY ANALYSIS STEPS " + "="*40)
+            #     if 'intermediate_steps' in result:
+            #         for i, step in enumerate(result['intermediate_steps'], 1):
+            #             tool_name = step[0].tool
+            #             tool_input = step[0].tool_input
+            #             tool_output = step[1][:500] + "..." if isinstance(step[1], str) and len(step[1]) > 500 else step[1]
+            #             print(f"\nRETRY STEP {i}: {tool_name.upper()}")
+            #             print(f"INPUT:\n{tool_input}")
+            #             print(f"OUTPUT:\n{tool_output}")
+            #             print("-"*80)
+            #     else:
+            #         print("No intermediate steps recorded in retry analysis")
                     
-                raw_output = result['output']
-                parsed = parser.parse(raw_output)
+            #     raw_output = result['output']
+            #     parsed = parser.parse(raw_output)
 
-                print("\n" + "="*40 + " FINAL VALIDATION " + "="*40)
-                print(f"Tools Used: {parsed.tools_used}")
-                print(f"Output Length: {len(raw_output)} characters")
-                print(f"Validation Successful: {parsed}")
+            #     print("\n" + "="*40 + " FINAL VALIDATION " + "="*40)
+            #     print(f"Tools Used: {parsed.tools_used}")
+            #     print(f"Output Length: {len(raw_output)} characters")
+            #     print(f"Validation Successful: {parsed}")
                 
-                response = f"**{parsed.topic}**\n\n{parsed.summary}"
-                chunks = split_response(response)
+            #     response = f"**{parsed.topic}**\n\n{parsed.summary}"
+            chunks = split_response(response)
 
             await loading_msg.delete()
             for chunk in chunks:
