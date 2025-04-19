@@ -27,10 +27,8 @@ research_tools = [restricted_web_search, url_scraper]
 analysis_tools = [url_scraper, reddit_search]
 
 research_prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a research assistant. Optimize search queries and gather sources.
-1. Analyze user query for key Marxist concepts
-2. Expand terms using dialectical relationships
-3. Output enhanced search query"""),
+    ("system", """You are a research assistant. Optimize search queries for Marxist research.
+Output ONLY the optimized search query - maximum 100 characters. No explanations."""),
     ("human", "{query}")
 ])
 
@@ -228,85 +226,110 @@ async def on_message(message):
             return
     if message.author.bot:
         return
-
     if client.user in message.mentions:
         ctx = await client.get_context(message)
         query = re.sub(rf'<@!?{client.user.id}>', '', message.content).strip()
         
         if not query:
             return await ctx.send("Please provide a query after the mention")
-
+        # Modified research phase in on_message()
         try:
-            loading_msg = await ctx.send("⚙️ Analyzing class contradictions...")
-            try:
-                optimized_query = await asyncio.wait_for(
-                    research_chain.ainvoke({"query": query}),
-                    timeout=30
-                )
-                search_results = await asyncio.wait_for(
-                    restricted_web_search.ainvoke({"query": optimized_query}),
-                    timeout=45
-                )
-            except asyncio.TimeoutError:
-                await loading_msg.edit(content="⌛ Research phase timed out, proceeding with limited context")
-                search_results = {"content": "[]"}
+            loading_msg = await ctx.send("⚙️ Processing query...")
             
-            # Handle the search results properly
-            context = []
+            # Get optimized query
+            research_response = await research_chain.ainvoke({"query": query})
+            print(f"19apr debug {research_response=}")
+            # Execute web search with optimized query
             try:
-                # First check if we got a ToolOutput object
-                if hasattr(search_results, 'content'):
-                    content = search_results.content
-                else:
-                    content = search_results.get("content", "")
-                
-                # Try to parse JSON if it's a string
-                if isinstance(content, str):
-                    try:
-                        results_data = json.loads(content)
-                    except json.JSONDecodeError:
-                        results_data = content  # fallback to raw content if not JSON
-                else:
-                    results_data = content
-
-                # Process results whether they came from JSON or direct content
-                if isinstance(results_data, list):
-                    for item in results_data[:5]:
-                        if isinstance(item, dict) and 'url' in item:
-                            try:
-                                scraped = await url_scraper.ainvoke({"url": item["url"]})
-                                context.append({
-                                    "source": item["url"],
-                                    "content": scraped.get("content", "") if isinstance(scraped, dict) else str(scraped)
-                                })
-                            except Exception as e:
-                                print(f"Error scraping {item['url']}: {str(e)}")
-                                continue
+                search_results = await restricted_web_search.ainvoke({"query": research_response})
+                if 'content' in search_results and search_results['content'].startswith("Search error:"):
+                    search_results = await restricted_web_search.ainvoke({"query": query + " site:marxists.org"})
             except Exception as e:
-                print(f"Error processing search results: {str(e)}")
-                await ctx.send("⚠️ Error processing search results, proceeding with limited context")
+                print(f"Search error: {str(e)}")
 
-            response = await safe_ai_call(
-                agent_executor.ainvoke,
-                {
-                    "query": query,
-                    "context": json.dumps(context) if context else "No context available"
-                }
-            )
-            # Handle the response properly
-            if isinstance(response, dict):
-                output = response.get('output', 'No analysis generated')
-            else:
-                output = str(response)
+            print(f"Search results: {search_results}")
             
-            chunks = split_response(output)
-            await loading_msg.delete()
-            for chunk in chunks:
-                if chunk.strip():
-                    await ctx.send(chunk)
+            if 'content' in search_results and search_results['content']:
+                print(f"19apr debug search_results['content']={search_results['content']}")
+                
+                # Check if the content indicates an error
+                if search_results['content'].startswith("Search error:"):
+                    await ctx.send("⚠️ Search error occurred. Please try again later.")
+                    return
+                
+                try:
+                    search_data = json.loads(search_results['content'])
+                except json.JSONDecodeError as e:
+                    print(f"JSON decode error: {str(e)}")
+                    await ctx.send("⚠️ Error processing search results: Invalid JSON format.")
+                    return
+            else:
+                print("No content found in search results.")
+                await ctx.send("⚠️ No search results returned.")
+                return
+            
+            # Scrape and process results
+            context = {
+                "original_query": query,
+                "optimized_query": research_response,
+                "sources": []
+            }
+            print(f"19apr debug {context=}")
+            # Process search results and scrape content
+            for item in search_data[:3]:  # Limit to 3 sources for depth
+                if 'url' in item:
+                    try:
+                        scraped = await url_scraper.ainvoke({"url": item["url"]})
+                        context["sources"].append({
+                            "url": item["url"],
+                            "content": scraped['content'][:2000]
+                        })
+                    except Exception as e:
+                        print(f"Error scraping {item['url']}: {str(e)}")
+                        continue
 
+            # Add Reddit perspectives
+            reddit_results = await reddit_search.ainvoke({"query": query})
+            if reddit_results['content'] != "No relevant Reddit discussions found":
+                context["sources"].append({
+                    "type": "reddit",
+                    "content": reddit_results['content'],
+                    "urls": reddit_results['sources']
+                })
+            # Step 4: Run analysis with the formatted context
+            await loading_msg.edit(content="📊 Performing dialectical analysis...")
+            
+            analysis_response = await agent_executor.ainvoke({
+                "query": query,
+                "context": json.dumps(context),
+                "agent_scratchpad": [],
+                "format_instructions": parser.get_format_instructions()  # Add format instructions
+            })
+
+            try:
+                validated = parser.parse(analysis_response['output'])
+                output = f"## {validated.topic}\n\n{validated.summary}"
+                output += f"\n\n*Tools used: {', '.join(validated.tools_used)}*"
+            except ValidationError:
+                output = analysis_response['output']
+            
+            # Step 5: Send the response in chunks
+            await loading_msg.delete()
+            chunks = split_response(output)
+            
+            if not chunks:
+                await ctx.send("⚠️ No analysis could be generated")
+                return
+                
+            for i, chunk in enumerate(chunks):
+                if i == 0:
+                    await ctx.send(f"**Analysis of '{query[:50]}...'**\n\n{chunk}")
+                else:
+                    await ctx.send(chunk)
         except ValidationError as e:
             await ctx.send(f"🚨 Validation error: {str(e)}")
+        except asyncio.TimeoutError:
+            await ctx.send("⏱️ Analysis timed out - please try a more specific query")
         except Exception as e:
             print(f"Error: {traceback.format_exc()}")
             await ctx.send(f"💥 Analysis failed: {str(e)}")
