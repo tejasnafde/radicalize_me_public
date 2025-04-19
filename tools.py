@@ -14,6 +14,7 @@ from praw.models import MoreComments
 from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
+import time
 
 
 @retry(stop=stop_after_attempt(3), 
@@ -51,6 +52,7 @@ def get_reddit_client():
 class ToolOutput(BaseModel):
     content: str = Field(description="Processed content from the tool")
     sources: List[str] = Field(description="List of source URLs used")
+    tool_name: str
 
 class RestrictedWebSearchInput(BaseModel):
     query: str = Field(description="Search query to look up")
@@ -70,10 +72,23 @@ def restricted_web_search(query: str) -> Dict:
     try:
         site_filter = " OR ".join([f"site:{d}" for d in allowed_domains])
         enhanced_query = f"{query} {site_filter}"
-        
+        print(f"Sending request to DuckDuckGo with query length: {len(enhanced_query)}")
         search = DuckDuckGoSearchAPIWrapper(max_results=5)
         results = search.results(enhanced_query, 5)
         
+        # Log the actual response for debugging
+        print(f"Raw search results: {results}")
+
+        # Check if results is a list and handle accordingly
+        if isinstance(results, list):
+            print("Received a list instead of an expected object.")
+            return ToolOutput(
+                content="Search error: Unexpected response format.",
+                sources=[],
+                tool_name="error in restricted web search"
+            ).dict()
+
+        print(f"Response status: {results.status if results else 'None'}")
         filtered = [
             {"title": r["title"], "url": r["link"], "snippet": r["snippet"]}
             for r in results if any(d in r["link"] for d in allowed_domains)
@@ -81,15 +96,31 @@ def restricted_web_search(query: str) -> Dict:
         print(f"18apr debug {filtered=}")
         return ToolOutput(
             content=json.dumps(filtered),
-            sources=[r["url"] for r in filtered]
+            sources=[r["url"] for r in filtered],
+            tool_name="restricted_web_search"
         ).dict()
     
     except Exception as e:
-        return ToolOutput(
-            content=f"Search error: {str(e)}",
-            sources=[]
-        ).dict()
-    
+        print(f"Error during search: {str(e)}")
+        if "Ratelimit" in str(e):
+            print("Rate limit reached. Waiting before retrying...")
+            time.sleep(10)  # Wait for 10 seconds before retrying
+            return restricted_web_search(query)  # Retry the same query
+
+        # Attempt a second call with a modified query
+        try:
+            fallback_query = f"{query} site:marxists.org"
+            print(f"Retrying with fallback query: {fallback_query}")
+            results = search.results(fallback_query, 5)
+            # Process results as before...
+            # (Include the same logic for processing results here)
+        except Exception as fallback_exception:
+            print(f"Error on fallback: {str(fallback_exception)}")
+            return ToolOutput(
+                content=f"Search error on fallback: {str(fallback_exception)}",
+                sources=[],
+                tool_name="error in restricted web search"
+            ).dict()
 
 allowed_subreddits = {
     'communism101', 'socialism', 'marxism',
@@ -190,13 +221,15 @@ def reddit_search(query: str, time_filter: str = "year") -> Dict:
         
         return ToolOutput(
             content="\n\n".join(results)[:4000] if results else "No relevant Reddit discussions found",
-            sources=sources
+            sources=sources,
+            tool_name="reddit_search"
         ).dict()
     
     except Exception as e:
         return ToolOutput(
             content=f"Reddit error: {str(e)}",
-            sources=[]
+            sources=[],
+            tool_name="error in reddit_search"
         ).dict()
 
 
@@ -223,11 +256,13 @@ def url_scraper(url: str) -> Dict:
         
         return ToolOutput(
             content=text,
-            sources=[url]
+            sources=[url],
+            tool_name="url_scrapper"
         ).dict()
         
     except Exception as e:
         return ToolOutput(
             content=f"Scraping error: {str(e)}",
-            sources=[]
+            sources=[],
+            tool_name="error in url_scrapper"
         ).dict()
