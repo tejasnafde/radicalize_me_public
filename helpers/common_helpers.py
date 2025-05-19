@@ -40,7 +40,7 @@ class CommonHelpers:
             'GOOGLE_CSE_ID',
             'SERPAPI_API_KEY',
             'DISCORD_ERROR_WEBHOOK_URL',
-            'DISCORD_BOT_TOKEN'
+            'DISCORD_TOKEN'
         ]
         missing = [var for var in required_vars if not os.getenv(var)]
         if missing:
@@ -70,14 +70,39 @@ class CommonHelpers:
     def report_to_discord(self, message: str, error_type: str = "ERROR") -> None:
         """Send error/debug messages to Discord channel"""
         try:
-            formatted_message = {
-                "embeds": [{
-                    "title": f"🤖 {error_type}",
-                    "description": message,
-                    "color": 16711680 if error_type == "ERROR" else 65280,  # Red for errors, Green for debug
-                    "timestamp": datetime.now().isoformat()
-                }]
-            }
+            # Format the message based on type
+            if error_type == "DEBUG" and isinstance(message, str) and message.startswith("{"):
+                # Parse JSON debug message
+                try:
+                    debug_data = json.loads(message)
+                    formatted_message = {
+                        "embeds": [{
+                            "title": "🔍 Debug Info",
+                            "description": f"**{debug_data.get('message', '')}**\n\n*{debug_data.get('timestamp', '')}*",
+                            "color": 3447003,  # Blue color
+                            "timestamp": datetime.now().isoformat()
+                        }]
+                    }
+                except json.JSONDecodeError:
+                    # If JSON parsing fails, use the original message
+                    formatted_message = {
+                        "embeds": [{
+                            "title": "🔍 Debug Info",
+                            "description": message,
+                            "color": 3447003,
+                            "timestamp": datetime.now().isoformat()
+                        }]
+                    }
+            else:
+                # For other message types
+                formatted_message = {
+                    "embeds": [{
+                        "title": f"🤖 {error_type}",
+                        "description": message,
+                        "color": 16711680 if error_type == "ERROR" else 65280,  # Red for errors, Green for info
+                        "timestamp": datetime.now().isoformat()
+                    }]
+                }
 
             # Send to webhook if available
             if self.webhook_url:
@@ -92,10 +117,9 @@ class CommonHelpers:
         """Send debug messages to Discord with additional context"""
         debug_info = {
             "message": message,
-            "timestamp": datetime.now().isoformat(),
-            "type": "DEBUG"
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
-        self.report_to_discord(json.dumps(debug_info, indent=2), "DEBUG")
+        self.report_to_discord(json.dumps(debug_info), "DEBUG")
 
     def info_to_discord(self, message: str) -> None:
         """Send info messages to Discord"""

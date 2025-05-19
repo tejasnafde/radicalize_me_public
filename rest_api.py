@@ -117,3 +117,6 @@ def register_error_handlers(app):
                 'timestamp': datetime.now().isoformat()
             }
         }), 429
+
+# Create the app instance that will be imported by flask_app.py
+app = create_app()

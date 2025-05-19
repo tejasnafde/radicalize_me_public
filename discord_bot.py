@@ -1,68 +1,55 @@
+import os
 import discord
 from discord.ext import commands
-import os
 import requests
-from dotenv import load_dotenv
+import json
+from helpers.common_helpers import CommonHelpers
 
-load_dotenv()
+# Initialize helpers
+helpers = CommonHelpers()
 
+# Bot configuration
 intents = discord.Intents.default()
-intents.messages = True
 intents.message_content = True
+client = commands.Bot(command_prefix='!', intents=intents)
 
-client = commands.Bot(
-    command_prefix=commands.when_mentioned,
-    intents=intents
-)
-
-API_URL = os.getenv('API_URL', 'http://localhost:5000/api/v1/analyze')
+# API configuration
+API_URL = os.getenv('API_URL', 'http://app:5000/api/v1/analyze')  # Use service name in Docker network
 
 @client.event
 async def on_ready():
-    print(f"Bot is ready! Logged in as {client.user}")
+    helpers.info_to_discord(f"Bot is ready! Logged in as {client.user}")
 
 @client.event
 async def on_message(message):
-    if message.author.bot:
+    if message.author == client.user:
         return
-    if client.user in message.mentions:
-        query = message.content.replace(f'<@{client.user.id}>', '').strip()
-        
-        if not query:
-            await message.channel.send("Please provide a query after the mention")
-            return
 
+    if client.user.mentioned_in(message):
         try:
-            # Send loading message
-            loading_msg = await message.channel.send("⚙️ Processing query...")
+            # Extract query from message
+            query = message.content.replace(f'<@{client.user.id}>', '').strip()
             
-            # Forward the request to our Flask API
+            # Make API request
             response = requests.post(
                 API_URL,
                 json={
-                    "query": query,
-                    "channel_id": str(message.channel.id),
-                    "user_id": str(message.author.id)
+                    'query': query,
+                    'user_id': str(message.author.id),
+                    'channel_id': str(message.channel.id)
                 }
             )
             
             if response.status_code == 200:
                 result = response.json()
-                # Delete loading message
-                await loading_msg.delete()
-                
-                # Send the response back to Discord
-                if 'content' in result:
-                    await message.channel.send(result['content'])
-                else:
-                    await message.channel.send("No response content found")
+                await message.channel.send(result.get('message', 'No response from analysis'))
             else:
-                await loading_msg.edit(content=f"❌ Error: {response.json().get('message', 'Unknown error')}")
+                helpers.debug_to_discord(f"API request failed with status {response.status_code}: {response.text}")
+                await message.channel.send("Sorry, I encountered an error processing your request.")
                 
         except Exception as e:
-            print(f"Error processing message: {str(e)}")
-            await message.channel.send(f"💥 An error occurred: {str(e)}")
-    await client.process_commands(message)
+            helpers.debug_to_discord(f"Error processing message: {str(e)}")
+            await message.channel.send("Sorry, I encountered an error processing your request.")
 
 # Run the bot
 if __name__ == "__main__":
