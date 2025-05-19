@@ -35,17 +35,24 @@ def create_app():
 
 def start_keep_alive(app, helpers):
     """Start the keep-alive thread"""
-    app_url = os.getenv('APP_URL')
+    app_url = os.getenv('APP_URL', 'http://app:5000')  # Default to internal Docker network URL
     ping_interval = int(os.getenv('PING_INTERVAL', 840))  # 14 minutes
     
     def ping_loop():
         while True:
             try:
+                # Try internal URL first
                 response = requests.get(f"{app_url}/api/v1/health")
                 if response.status_code == 200:
                     helpers.info_to_discord(f"Ping successful at {time.strftime('%Y-%m-%d %H:%M:%S')}")
                 else:
-                    helpers.debug_to_discord(f"Ping failed with status {response.status_code}")
+                    # Try external URL as fallback
+                    external_url = 'http://localhost:5001'
+                    response = requests.get(f"{external_url}/api/v1/health")
+                    if response.status_code == 200:
+                        helpers.info_to_discord(f"Ping successful (external) at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    else:
+                        helpers.debug_to_discord(f"Ping failed with status {response.status_code}")
             except Exception as e:
                 helpers.debug_to_discord(f"Ping error: {str(e)}")
             time.sleep(ping_interval)

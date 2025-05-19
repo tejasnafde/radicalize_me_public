@@ -44,7 +44,12 @@ class SearchAPIManager:
             'duckduckgo': 2,
             'serpapi': 1
         }
-        self.helpers.debug_to_discord(f"Rate limits configured: {json.dumps(self.rate_limits, indent=2)}")
+        self.helpers.debug_to_discord(
+            f"Rate limits configured:\n" +
+            f"• Google: {self.rate_limits['google']}s\n" +
+            f"• DuckDuckGo: {self.rate_limits['duckduckgo']}s\n" +
+            f"• SerpAPI: {self.rate_limits['serpapi']}s"
+        )
 
     async def check_rate_limit(self, api: str) -> bool:
         """Check if an API is within its rate limit"""
