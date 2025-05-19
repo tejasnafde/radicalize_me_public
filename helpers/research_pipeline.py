@@ -54,15 +54,30 @@ class ResearchPipeline:
         """Main pipeline that processes a user query from start to finish"""
         try:
             # 1. Optimize the query for better search results
-            optimized_query = await self.optimize_search_query(query)
+            retry_count = 0
+            max_retries = 3
+            while retry_count < max_retries:
+                try:
+                    optimized_query = await self.optimize_search_query(query)
+                    break
+                except Exception as e:
+                    if not await self.common_helpers.handle_api_error(e, retry_count, max_retries):
+                        raise
+                    retry_count += 1
             
             # 2. Gather research data
             research_data = await self.gather_research_data(optimized_query, query)
             
             # 3. Generate structured response
-            response = await self.generate_response(query, research_data)
-            
-            return response
+            retry_count = 0
+            while retry_count < max_retries:
+                try:
+                    response = await self.generate_response(query, research_data)
+                    return response
+                except Exception as e:
+                    if not await self.common_helpers.handle_api_error(e, retry_count, max_retries):
+                        raise
+                    retry_count += 1
             
         except Exception as e:
             self.common_helpers.debug_to_discord(f"Pipeline failed for query: {query} - {str(e)}")
@@ -74,7 +89,11 @@ class ResearchPipeline:
     async def optimize_search_query(self, query: str) -> str:
         """Optimizes the user's query for better search results"""
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a research assistant. Optimize search queries for Marxist research. Output ONLY the optimized search query - maximum 100 characters. No explanations."),
+            ("system", """You are a Marxist research assistant. Optimize search queries for historical research.
+            Focus on primary sources, academic works, and historical documents.
+            Avoid Cold War-era propaganda terms and biased language.
+            Output ONLY the optimized search query - maximum 100 characters.
+            No explanations."""),
             ("human", "{query}")
         ])
         chain = prompt | self.query_optimizer | StrOutputParser()
@@ -98,16 +117,36 @@ class ResearchPipeline:
         }
     async def generate_response(self, query: str, research_data: Dict) -> Dict:
         """Generates a structured response based on research data"""
+        # Extract PDF links from research data
+        pdf_links = []
+        for source in research_data.get("sources", []):
+            if source.get("type") == "pdf":
+                pdf_links.append({
+                    "title": source.get("title", "PDF Document"),
+                    "url": source.get("url")
+                })
+
         analysis_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a Marxist analyst. Use provided research context and tools.
-                
+            ("system", """You are a Marxist historian and analyst. Analyze the provided research context using historical materialism and dialectical methods.
+
             RESEARCH CONTEXT:
             {context}
+
             ANALYSIS PROTOCOL:
-            1. Cross-reference sources
-            2. Apply historical materialism
+            1. Focus on primary sources and historical documents
+            2. Apply historical materialism and dialectical analysis
             3. Cite sources with [Source#] notation
-            4. Use the agent scratchpad for intermediate steps: {agent_scratchpad}"""),
+            4. Avoid Cold War-era propaganda terms and biased language
+            5. Consider historical context and material conditions
+            6. Use the agent scratchpad for intermediate steps: {agent_scratchpad}
+
+            GUIDELINES:
+            - Use historically accurate terminology
+            - Avoid sensationalist or propagandistic language
+            - Consider multiple perspectives and historical context
+            - Focus on material conditions and class analysis
+            - Cite specific sources for claims
+            - Maintain academic rigor and objectivity"""),
             ("human", "{query}")
         ])
         
@@ -120,11 +159,16 @@ class ResearchPipeline:
             "context": json.dumps(research_data),
             "agent_scratchpad": []
         })       
-        return {
+
+        # Add PDF links to the response
+        response = {
             "topic": analysis_response.topic,
             "summary": analysis_response.summary,
-            "tools_used": analysis_response.tools_used
+            "tools_used": analysis_response.tools_used,
+            "pdf_links": pdf_links
         }
+
+        return response
     # Helper methods for web search, scraping, etc.
     async def web_search(self, query: str) -> List[Dict]:
         """Performs restricted web search with API rotation"""
@@ -153,8 +197,36 @@ class ResearchPipeline:
                 )
                 response.raise_for_status()
                 
+                # Check content type
+                content_type = response.headers.get('content-type', '').lower()
+                
+                if 'application/pdf' in content_type or result["link"].lower().endswith('.pdf'):
+                    # For PDFs, just use the snippet and title
+                    scraped_content.append({
+                        "url": result["link"],
+                        "title": result.get("title", ""),
+                        "content": f"PDF Document: {result.get('snippet', '')}",
+                        "snippet": result.get("snippet", ""),
+                        "type": "pdf"
+                    })
+                    self.common_helpers.debug_to_discord(f"Handled PDF document: {result['link']}")
+                    continue
+                
+                # For HTML content
                 soup = BeautifulSoup(response.text, 'html.parser')
                 main_content = soup.find('article') or soup.find('main') or soup.body
+                
+                if not main_content:
+                    self.common_helpers.debug_to_discord(f"No main content found for {result['link']}, using snippet")
+                    # If no main content found, use the snippet
+                    scraped_content.append({
+                        "url": result["link"],
+                        "title": result.get("title", ""),
+                        "content": result.get("snippet", ""),
+                        "snippet": result.get("snippet", ""),
+                        "type": "snippet"
+                    })
+                    continue
                 
                 # Clean and format text
                 text = main_content.get_text(separator='\n', strip=True)
@@ -164,11 +236,20 @@ class ResearchPipeline:
                     "url": result["link"],
                     "title": result.get("title", ""),
                     "content": text,
-                    "snippet": result.get("snippet", "")
+                    "snippet": result.get("snippet", ""),
+                    "type": "html"
                 })
                 
             except Exception as e:
                 self.common_helpers.debug_to_discord(f"Error scraping {result['link']}: {str(e)}")
+                # Add the result with just the snippet if scraping fails
+                scraped_content.append({
+                    "url": result["link"],
+                    "title": result.get("title", ""),
+                    "content": result.get("snippet", ""),
+                    "snippet": result.get("snippet", ""),
+                    "type": "error"
+                })
                 continue
                 
         return scraped_content
@@ -234,11 +315,13 @@ class ResearchPipeline:
             return {
                 "topic": validated.topic,
                 "summary": validated.summary,
-                "tools_used": validated.tools_used
+                "tools_used": validated.tools_used,
+                "pdf_links": []  # Initialize empty PDF links list
             }
         except ValidationError:
             return {
                 "topic": "Analysis",
                 "summary": analysis_response,
-                "tools_used": []
+                "tools_used": [],
+                "pdf_links": []  # Initialize empty PDF links list
             }
