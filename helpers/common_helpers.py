@@ -4,9 +4,13 @@ import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 import requests
+import praw
+import asyncio
+from functools import lru_cache
 
 class CommonHelpers:
     def __init__(self):
+        self.validate_env_vars()  # Call validation during initialization
         self.api_keys = [
             os.getenv('GOOGLE_API_KEY'),
             # Add more API keys here
@@ -14,6 +18,33 @@ class CommonHelpers:
         self.webhook_url = os.getenv('DISCORD_ERROR_WEBHOOK_URL')
         self.test_channel_id = os.getenv('DISCORD_TEST_CHANNEL_ID')
         self.bot_token = os.getenv('DISCORD_BOT_TOKEN')
+        self.rate_limiter = {
+            'web_search': time.time(),
+            'reddit_search': time.time()
+        }
+        self.rate_limit_seconds = {
+            'web_search': 2,
+            'reddit_search': 5
+        }
+        self.reddit_client = self.get_reddit_client()
+
+    def validate_env_vars(self):
+        """Validate required environment variables"""
+        required_vars = [
+            'REDDIT_CLIENT_ID',
+            'REDDIT_CLIENT_SECRET',
+            'REDDIT_USERNAME',
+            'REDDIT_PASSWORD',
+            'REDDIT_USER_AGENT',
+            'GOOGLE_API_KEY',
+            'GOOGLE_CSE_ID',
+            'SERPAPI_API_KEY',
+            'DISCORD_ERROR_WEBHOOK_URL',
+            'DISCORD_BOT_TOKEN'
+        ]
+        missing = [var for var in required_vars if not os.getenv(var)]
+        if missing:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
     def create_response(self, status: int, result: Any, message: str = "") -> Dict:
         """Create a standardized response format"""
@@ -54,26 +85,17 @@ class CommonHelpers:
                     self.webhook_url,
                     json=formatted_message
                 )
-            
-            # Also send to test channel if configured
-            if self.test_channel_id and self.bot_token:
-                channel_url = f"https://discord.com/api/v10/channels/{self.test_channel_id}/messages"
-                headers = {
-                    "Authorization": f"Bot {self.bot_token}",
-                    "Content-Type": "application/json"
-                }
-                requests.post(
-                    channel_url,
-                    headers=headers,
-                    json=formatted_message
-                )
-
         except Exception as e:
-            print(f"Failed to send error report to Discord: {str(e)}")
+            print(f"[ERROR] Failed to send error report to Discord: {str(e)}")
 
     def debug_to_discord(self, message: str) -> None:
-        """Send debug messages to Discord"""
-        self.report_to_discord(message, "DEBUG")
+        """Send debug messages to Discord with additional context"""
+        debug_info = {
+            "message": message,
+            "timestamp": datetime.now().isoformat(),
+            "type": "DEBUG"
+        }
+        self.report_to_discord(json.dumps(debug_info, indent=2), "DEBUG")
 
     def info_to_discord(self, message: str) -> None:
         """Send info messages to Discord"""
@@ -107,5 +129,25 @@ class CommonHelpers:
             "user_id": request_data.get("user_id"),
             "channel_id": request_data.get("channel_id")
         }
-        # You can implement your preferred logging method here
-        print(json.dumps(log_entry))
+        print(f"[INFO] Request logged: {json.dumps(log_entry)}")
+
+    @lru_cache(maxsize=1)
+    def get_reddit_client(self):
+        """Cached Reddit client to avoid multiple initializations"""
+        return praw.Reddit(
+            client_id=os.getenv('REDDIT_CLIENT_ID'),
+            client_secret=os.getenv('REDDIT_CLIENT_SECRET'),
+            username=os.getenv('REDDIT_USERNAME'),
+            password=os.getenv('REDDIT_PASSWORD'),
+            user_agent=os.getenv('REDDIT_USER_AGENT'),
+            ratelimit_seconds=300,
+            check_for_async=False
+        )
+
+    async def check_rate_limit(self, operation: str):
+        """Check and enforce rate limits"""
+        current_time = time.time()
+        last_operation = self.rate_limiter.get(operation, 0)
+        if current_time - last_operation < self.rate_limit_seconds[operation]:
+            await asyncio.sleep(self.rate_limit_seconds[operation])
+        self.rate_limiter[operation] = current_time

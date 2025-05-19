@@ -1,43 +1,119 @@
 import os
 from flask import Flask, request, jsonify
 from flask_restful import Api
-from helpers.common_helper import report_to_discord
-from utils.log_util import app_log
-import ui.discord_ui as discord_ui
+from helpers.common_helpers import CommonHelpers
+import ui.bot_ui as bot_ui
+import threading
+import time
+import requests
+import json
+from datetime import datetime
 
-# Initialize Flask app
-app = Flask(__name__)
-app_log(app)
-app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'default-secret-key')
+def create_app():
+    app = Flask(__name__)
+    app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'default-secret-key')
+    
+    # Initialize API
+    api = Api(app)
+    
+    # Base URL for all endpoints
+    base_url = '/api/v1/'
+    
+    # Register endpoints
+    api.add_resource(bot_ui.HealthCheck, base_url + 'health')
+    api.add_resource(bot_ui.DiscordAnalysis, base_url + 'analyze')
+    
+    # Register error handlers
+    register_error_handlers(app)
+    
+    # Initialize keep-alive only if APP_URL is set (for production)
+    if os.getenv('APP_URL'):
+        helpers = CommonHelpers()
+        start_keep_alive(app, helpers)
+    
+    return app
 
-# Initialize API and error handler
-api = Api(app)
-
-# Base URL for all endpoints
-base_url = '/api/v1/'
-
-# Health Check
-api.add_resource(discord_ui.HealthCheck, base_url + 'health')
-
-# Main Analysis Endpoint
-api.add_resource(discord_ui.DiscordAnalysis, base_url + 'analyze')
+def start_keep_alive(app, helpers):
+    """Start the keep-alive thread"""
+    app_url = os.getenv('APP_URL')
+    ping_interval = int(os.getenv('PING_INTERVAL', 840))  # 14 minutes
+    
+    def ping_loop():
+        while True:
+            try:
+                response = requests.get(f"{app_url}/api/v1/health")
+                if response.status_code == 200:
+                    helpers.info_to_discord(f"Ping successful at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                else:
+                    helpers.debug_to_discord(f"Ping failed with status {response.status_code}")
+            except Exception as e:
+                helpers.debug_to_discord(f"Ping error: {str(e)}")
+            time.sleep(ping_interval)
+    
+    # Start the ping thread
+    thread = threading.Thread(target=ping_loop)
+    thread.daemon = True
+    thread.start()
+    helpers.info_to_discord("Keep-alive service started")
 
 # Error Handlers
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({
-        'error': {
-            'status': 404,
-            'message': 'RESOURCE.NOT_FOUND'
-        }
-    }), 404
+def register_error_handlers(app):
+    @app.errorhandler(404)
+    def not_found(error):
+        print(f"[ERROR] 404 Not Found: {request.url}")
+        return jsonify({
+            'error': {
+                'status': 404,
+                'message': 'RESOURCE.NOT_FOUND',
+                'path': request.url,
+                'timestamp': datetime.now().isoformat()
+            }
+        }), 404
 
-@app.errorhandler(500)
-def internal_error(error):
-    error_handler.report_to_discord(str(error))
-    return jsonify({
-        'error': {
-            'status': 500,
-            'message': 'SERVER.INTERNAL_ERROR'
+    @app.errorhandler(500)
+    def internal_error(error):
+        error_details = {
+            'error': str(error),
+            'type': type(error).__name__,
+            'path': request.url,
+            'method': request.method,
+            'timestamp': datetime.now().isoformat()
         }
-    }), 500
+        
+        # Log the error
+        print(f"[ERROR] 500 Internal Error: {json.dumps(error_details, indent=2)}")
+        
+        # Report to Discord
+        helpers = CommonHelpers()
+        helpers.handle_exceptions(error, error_details)
+        
+        return jsonify({
+            'error': {
+                'status': 500,
+                'message': 'SERVER.INTERNAL_ERROR',
+                'timestamp': error_details['timestamp']
+            }
+        }), 500
+
+    @app.errorhandler(400)
+    def bad_request(error):
+        print(f"[ERROR] 400 Bad Request: {request.url} - {str(error)}")
+        return jsonify({
+            'error': {
+                'status': 400,
+                'message': 'BAD_REQUEST',
+                'details': str(error),
+                'timestamp': datetime.now().isoformat()
+            }
+        }), 400
+
+    @app.errorhandler(429)
+    def too_many_requests(error):
+        print(f"[ERROR] 429 Rate Limit Exceeded: {request.url}")
+        return jsonify({
+            'error': {
+                'status': 429,
+                'message': 'RATE_LIMIT_EXCEEDED',
+                'timestamp': datetime.now().isoformat()
+            }
+        }), 429

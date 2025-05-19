@@ -116,11 +116,11 @@ def restricted_web_search(query: str) -> Dict:
             # (Include the same logic for processing results here)
         except Exception as fallback_exception:
             print(f"Error on fallback: {str(fallback_exception)}")
-            return ToolOutput(
+        return ToolOutput(
                 content=f"Search error on fallback: {str(fallback_exception)}",
-                sources=[],
-                tool_name="error in restricted web search"
-            ).dict()
+            sources=[],
+            tool_name="error in restricted web search"
+        ).dict()
 
 allowed_subreddits = {
     'communism101', 'socialism', 'marxism',
