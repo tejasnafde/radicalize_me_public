@@ -14,13 +14,13 @@ class SearchAPIManager:
         self.helpers.debug_to_discord(f"Initializing SearchAPIManager at {datetime.now().isoformat()}")
         
         # Initialize API keys
-        self.google_api_key = os.getenv('GOOGLE_API_KEY')
+        self.google_api_key = os.getenv('GOOGLE_API_KEY')  # This should be the Custom Search API key
         self.google_cse_id = os.getenv('GOOGLE_CSE_ID')
         self.serpapi_key = os.getenv('SERPAPI_API_KEY')
         
         # Log API key availability (without exposing the keys)
         self.helpers.debug_to_discord(
-            f"API Keys Status - Google: {'✓' if self.google_api_key else '✗'}, "
+            f"API Keys Status - Google Custom Search: {'✓' if self.google_api_key else '✗'}, "
             f"Google CSE: {'✓' if self.google_cse_id else '✗'}, "
             f"SerpAPI: {'✓' if self.serpapi_key else '✗'}"
         )
@@ -82,13 +82,16 @@ class SearchAPIManager:
 
     async def get_available_api(self) -> Optional[str]:
         """Get the next available API that's not rate limited"""
-        available_apis = []
-        for api in ['google', 'duckduckgo', 'serpapi']:
-            if await self.check_rate_limit(api):
-                available_apis.append(api)
+        # Try APIs in specific order: SerpAPI -> DuckDuckGo -> Google
+        api_order = ['serpapi', 'duckduckgo', 'google']
         
-        self.helpers.debug_to_discord(f"Available APIs: {available_apis}")
-        return available_apis[0] if available_apis else None
+        for api in api_order:
+            if await self.check_rate_limit(api):
+                self.helpers.debug_to_discord(f"Selected {api} as next available API")
+                return api
+        
+        self.helpers.debug_to_discord("No APIs available at the moment")
+        return None
 
     async def search(self, query: str, site_filter: str) -> List[Dict]:
         """Perform search using available APIs"""
@@ -98,12 +101,13 @@ class SearchAPIManager:
         enhanced_query = f"{query} {site_filter}"
         max_retries = 3
         retry_count = 0
+        tried_apis = set()
         
         while retry_count < max_retries:
             api = await self.get_available_api()
-            if not api:
-                self.helpers.debug_to_discord(f"All APIs are rate limited. Attempt {retry_count + 1}/{max_retries}")
-                await asyncio.sleep(5)
+            if not api or api in tried_apis:
+                self.helpers.debug_to_discord(f"All APIs are rate limited or tried. Attempt {retry_count + 1}/{max_retries}")
+                await asyncio.sleep(5)  # Wait 5 seconds before retrying
                 retry_count += 1
                 continue
                 
@@ -116,11 +120,13 @@ class SearchAPIManager:
                     return results
                 else:
                     self.helpers.debug_to_discord(f"No results returned from {api}")
+                    tried_apis.add(api)
             except Exception as e:
                 self.helpers.debug_to_discord(f"{api} search failed: {str(e)}")
                 self.helpers.debug_to_discord(f"Full error details: {type(e).__name__}: {str(e)}")
-                self.api_usage[api]['used'] += 1
+                tried_apis.add(api)
                 retry_count += 1
+                await asyncio.sleep(2)  # Wait 2 seconds before trying next API
                 continue
                 
         self.helpers.debug_to_discord("All search APIs failed after maximum retries")
@@ -150,7 +156,9 @@ class SearchAPIManager:
             
         elif api == 'duckduckgo':
             try:
-                results = self.ddg_search.results(query, 5)
+                # Remove site filter for DuckDuckGo as it doesn't support it
+                clean_query = query.split(" site:")[0]
+                results = self.ddg_search.results(clean_query, 5)
                 self.helpers.debug_to_discord(f"DuckDuckGo search returned {len(results)} results")
                 return [{
                     "title": r["title"],

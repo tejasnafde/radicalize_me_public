@@ -175,3 +175,41 @@ class CommonHelpers:
         if current_time - last_operation < self.rate_limit_seconds[operation]:
             await asyncio.sleep(self.rate_limit_seconds[operation])
         self.rate_limiter[operation] = current_time
+
+    async def ping_health_endpoint(self):
+        """Ping the health endpoint to keep the service alive"""
+        try:
+            # Use the correct port (5001) for external access
+            health_url = "http://localhost:5001/api/v1/health"
+            self.debug_to_discord(f"Pinging health endpoint: {health_url}")
+            response = requests.get(health_url, timeout=5)
+            response.raise_for_status()
+            self.debug_to_discord("Health check successful")
+            return True
+        except Exception as e:
+            self.debug_to_discord(f"Health check failed: {str(e)}")
+            return False
+
+    async def handle_api_error(self, error: Exception, retry_count: int = 0, max_retries: int = 3) -> bool:
+        """Handle API errors with retry logic"""
+        if retry_count >= max_retries:
+            self.debug_to_discord(f"Max retries ({max_retries}) exceeded for API call")
+            return False
+
+        # Check if it's a rate limit error
+        if "429" in str(error) or "quota" in str(error).lower():
+            retry_delay = 40  # Default delay for rate limits
+            try:
+                # Try to extract retry delay from error message
+                if "retry_delay" in str(error):
+                    retry_delay = int(str(error).split("seconds: ")[1].split("}")[0]) + 5
+            except:
+                pass
+            
+            self.debug_to_discord(f"Rate limit hit, waiting {retry_delay} seconds before retry {retry_count + 1}/{max_retries}")
+            await asyncio.sleep(retry_delay)
+            return True
+
+        # For other errors, wait a shorter time
+        await asyncio.sleep(2 ** retry_count)  # Exponential backoff
+        return True

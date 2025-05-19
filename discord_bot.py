@@ -4,6 +4,7 @@ from discord.ext import commands
 import requests
 import json
 from helpers.common_helpers import CommonHelpers
+import aiohttp
 
 # Initialize helpers
 helpers = CommonHelpers()
@@ -30,26 +31,36 @@ async def on_message(message):
             # Extract query from message
             query = message.content.replace(f'<@{client.user.id}>', '').strip()
             
-            # Make API request
-            response = requests.post(
-                API_URL,
-                json={
-                    'query': query,
-                    'user_id': str(message.author.id),
-                    'channel_id': str(message.channel.id)
-                }
-            )
+            # Send initial response
+            await message.channel.send("🔍 Analyzing your query...")
             
-            if response.status_code == 200:
-                result = response.json()
-                await message.channel.send(result.get('message', 'No response from analysis'))
-            else:
-                helpers.debug_to_discord(f"API request failed with status {response.status_code}: {response.text}")
-                await message.channel.send("Sorry, I encountered an error processing your request.")
-                
+            # Make API request
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    API_URL,
+                    json={"query": query, "user_id": str(message.author.id)}
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        # Format the response
+                        response_text = f"**{data['topic']}**\n\n{data['summary']}\n\n"
+                        
+                        # Add PDF links section if available
+                        if data.get('pdf_links'):
+                            response_text += "\n**📚 Read More**\n"
+                            for pdf in data['pdf_links']:
+                                response_text += f"• [{pdf['title']}]({pdf['url']})\n"
+                        
+                        # Send the response
+                        await message.channel.send(response_text)
+                    else:
+                        error_text = await response.text()
+                        await message.channel.send(f"❌ Error: {error_text}")
+                        
         except Exception as e:
             helpers.debug_to_discord(f"Error processing message: {str(e)}")
-            await message.channel.send("Sorry, I encountered an error processing your request.")
+            await message.channel.send("❌ An error occurred while processing your request.")
 
 # Run the bot
 if __name__ == "__main__":
