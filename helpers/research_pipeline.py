@@ -15,6 +15,7 @@ from .search_apis import SearchAPIManager
 import asyncio
 import os
 import google.generativeai as genai
+from huggingface_hub import AsyncInferenceClient
 
 class Response(BaseModel):
     topic: str = Field(description="Main topic of analysis")
@@ -30,7 +31,7 @@ class ResearchPipeline:
         self.search_manager = SearchAPIManager()  # Add this line
         
         # Configure Google API
-        genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+        genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
         
         # Initialize multiple LLM providers
         self.llm_providers = []
@@ -40,55 +41,67 @@ class ResearchPipeline:
             self.llm_providers.append({
                 'name': 'groq',
                 'llm': ChatGroq(
-                    model_name="mixtral-8x7b-32768",
+                    model_name="llama3-70b-8192",  # Updated to current production model
                     temperature=0.3,
                     max_tokens=4000,
-                    groq_api_key=os.getenv('GROQ_API_KEY')
+                    groq_api_key=os.getenv('GROQ_API_KEY'),
+                    max_retries=0  # No retries, we'll handle it ourselves
                 )
             })
+            self.common_helpers.debug_to_discord("Groq provider initialized successfully")
+        else:
+            self.common_helpers.debug_to_discord("Groq provider not available - GROQ_API_KEY not set")
         
         # Add HuggingFace models if API key is available
         if os.getenv('HUGGINGFACE_API_KEY'):
             self.llm_providers.extend([
                 {
                     'name': 'huggingface_mistral',
-                    'llm': HuggingFaceEndpoint(
-                        repo_id="mistralai/Mistral-7B-Instruct-v0.2",
-                        task="text-generation",
-                        temperature=0.3,
-                        max_new_tokens=4000,
-                        top_p=0.95,
-                        huggingfacehub_api_token=os.getenv('HUGGINGFACE_API_KEY')
+                    'llm': AsyncInferenceClient(
+                        model="mistralai/Mistral-7B-Instruct-v0.2",
+                        token=os.getenv('HUGGINGFACE_API_KEY')
                     )
                 },
                 {
                     'name': 'huggingface_llama',
-                    'llm': HuggingFaceEndpoint(
-                        repo_id="meta-llama/Llama-2-70b-chat-hf",
-                        task="text-generation",
-                        temperature=0.3,
-                        max_new_tokens=4000,
-                        top_p=0.95,
-                        huggingfacehub_api_token=os.getenv('HUGGINGFACE_API_KEY')
+                    'llm': AsyncInferenceClient(
+                        model="meta-llama/Llama-2-70b-chat-hf",
+                        token=os.getenv('HUGGINGFACE_API_KEY')
                     )
                 }
             ])
+            self.common_helpers.debug_to_discord("HuggingFace providers (Mistral and Llama) initialized successfully")
+        else:
+            self.common_helpers.debug_to_discord("HuggingFace providers not available - HUGGINGFACE_API_KEY not set")
         
         # Add Gemini as final fallback
-        self.llm_providers.append({
-            'name': 'gemini',
-            'llm': ChatGoogleGenerativeAI(
-                model="gemini-1.5-pro",
-                temperature=0.3,
-                safety_settings={category: HarmBlockThreshold.BLOCK_NONE 
-                               for category in HarmCategory},
-                max_output_tokens=4000,
-                max_retries=0
-            )
-        })
+        if os.getenv('GOOGLE_API_KEY'):
+            self.llm_providers.append({
+                'name': 'gemini',
+                'llm': ChatGoogleGenerativeAI(
+                    model="gemini-1.5-pro",
+                    temperature=0.3,
+                    convert_system_message_to_human=True,
+                    safety_settings={
+                        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE
+                    },
+                    max_output_tokens=4000,
+                    max_retries=0  # Reduced retries to avoid long waits
+                )
+            })
+            self.common_helpers.debug_to_discord("Gemini provider initialized successfully")
+        else:
+            self.common_helpers.debug_to_discord("Gemini provider not available - GOOGLE_API_KEY not set")
         
         if not self.llm_providers:
-            raise ValueError("No LLM providers configured. Please set GROQ_API_KEY, HUGGINGFACE_API_KEY, or GEMINI_API_KEY")
+            raise ValueError("No LLM providers configured. Please set GROQ_API_KEY, HUGGINGFACE_API_KEY, or GOOGLE_API_KEY")
+        
+        # Log available providers
+        provider_names = [p['name'] for p in self.llm_providers]
+        self.common_helpers.debug_to_discord(f"Available LLM providers: {', '.join(provider_names)}")
         
         # Other initializations
         self.allowed_domains = [
@@ -117,93 +130,56 @@ class ResearchPipeline:
         ])
         
         # Try each provider until one works
-        for _ in range(len(self.llm_providers)):
-            provider = self._get_next_llm()
+        for provider in self.llm_providers:
             try:
+                self.common_helpers.debug_to_discord(f"Attempting query optimization with {provider['name']}")
                 chain = prompt | provider['llm'] | StrOutputParser()
                 result = await chain.ainvoke({"query": query})
                 if result and isinstance(result, str) and len(result.strip()) > 0:
-                    self.common_helpers.debug_to_discord(f"Successfully optimized query using {provider['name']}")
+                    self.common_helpers.debug_to_discord(f"Successfully optimized query using {provider['name']}: {result}")
                     return result
+                self.common_helpers.debug_to_discord(f"Empty response from {provider['name']}")
                 raise ValueError("Empty or invalid response")
             except Exception as e:
                 self.common_helpers.report_to_discord(f"Failed with {provider['name']}: {str(e)}, trying next provider...")
-                # Add delay between attempts
-                await asyncio.sleep(5)
+                # Only wait 2 seconds between providers
+                await asyncio.sleep(2)
                 continue
         
-        raise Exception("All LLM providers failed")
+        # If all providers fail, return original query
+        self.common_helpers.debug_to_discord("All LLM providers failed for query optimization, using original query")
+        return query
 
     async def process_query(self, query: str) -> Dict:
         """Main pipeline that processes a user query from start to finish"""
         try:
-            # 1. Optimize the query for better search results
-            retry_count = 0
-            max_retries = 3
-            optimized_query = None
+            self.common_helpers.debug_to_discord(f"Starting query processing: {query}")
             
-            while retry_count < max_retries:
-                try:
-                    optimized_query = await self.optimize_search_query(query)
-                    if optimized_query:
-                        # Add delay after query optimization
-                        await asyncio.sleep(10)  # Wait 10 seconds before next API call
-                        break
-                except Exception as e:
-                    # Extract retry delay from error message if available
-                    retry_delay = 15  # Default delay (5 + 10 buffer)
-                    if hasattr(e, 'response') and hasattr(e.response, 'json'):
-                        try:
-                            error_data = e.response.json()
-                            if 'retry_delay' in error_data:
-                                api_delay = int(error_data['retry_delay'].get('seconds', 5))
-                                buffer = 10
-                                retry_delay = api_delay + buffer  # Add 10 second buffer
-                        except (ValueError, TypeError):
-                            pass
-                    
-                    self.common_helpers.debug_to_discord(f"Rate limit hit, waiting {retry_delay} seconds before retry {retry_count + 1}/{max_retries}")
-                    await asyncio.sleep(retry_delay)
-                    
-                    if not await self.common_helpers.handle_api_error(e, retry_count, max_retries):
-                        raise
-                    retry_count += 1
-            
-            if not optimized_query:
-                raise ValueError("Failed to optimize query after maximum retries")
+            # 1. Try to optimize the query, but fall back to original if it fails
+            optimized_query = await self.optimize_search_query(query)
+            self.common_helpers.debug_to_discord(f"Query optimization complete. Original: {query}, Optimized: {optimized_query}")
             
             # 2. Gather research data
             research_data = await self.gather_research_data(optimized_query, query)
+            self.common_helpers.debug_to_discord(f"Research data gathered. Sources: {len(research_data.get('sources', []))}")
             
             # 3. Generate structured response
-            retry_count = 0
-            while retry_count < max_retries:
+            for provider in self.llm_providers:
                 try:
-                    response = await self.generate_response(query, research_data)
+                    self.common_helpers.debug_to_discord(f"Attempting response generation with {provider['name']}")
+                    response = await self.generate_response(query, research_data, provider)
                     if response and isinstance(response, dict):
+                        self.common_helpers.debug_to_discord(f"Successfully generated response using {provider['name']}")
                         return response
+                    self.common_helpers.debug_to_discord(f"Invalid response format from {provider['name']}")
                     raise ValueError("Invalid response format from generate_response")
                 except Exception as e:
-                    # Extract retry delay from error message if available
-                    retry_delay = 15  # Default delay (5 + 10 buffer)
-                    if hasattr(e, 'response') and hasattr(e.response, 'json'):
-                        try:
-                            error_data = e.response.json()
-                            if 'retry_delay' in error_data:
-                                api_delay = int(error_data['retry_delay'].get('seconds', 5))
-                                buffer = 10
-                                retry_delay = api_delay + buffer  # Add 10 second buffer
-                        except (ValueError, TypeError):
-                            pass
-                    
-                    self.common_helpers.debug_to_discord(f"Rate limit hit, waiting {retry_delay} seconds before retry {retry_count + 1}/{max_retries}")
-                    await asyncio.sleep(retry_delay)
-                    
-                    if not await self.common_helpers.handle_api_error(e, retry_count, max_retries):
-                        raise
-                    retry_count += 1
+                    self.common_helpers.report_to_discord(f"Failed with {provider['name']}: {str(e)}, trying next provider...")
+                    # Only wait 2 seconds between providers
+                    await asyncio.sleep(2)
+                    continue
             
-            raise ValueError("Failed to generate response after maximum retries")
+            raise Exception("All LLM providers failed to generate response")
             
         except Exception as e:
             self.common_helpers.report_to_discord(f"Pipeline failed for query: {query} - {str(e)}")
@@ -232,7 +208,7 @@ class ResearchPipeline:
             "reddit_content": reddit_results
         }
 
-    async def generate_response(self, query: str, research_data: Dict) -> Dict:
+    async def generate_response(self, query: str, research_data: Dict, provider: Dict) -> Dict:
         """Generates a structured response based on research data"""
         try:
             # Extract PDF links from research data
@@ -267,48 +243,85 @@ class ResearchPipeline:
                 - Consider multiple perspectives and historical context
                 - Focus on material conditions and class analysis
                 - Cite specific sources for claims
-                - Maintain academic rigor and objectivity"""),
+                - Maintain academic rigor and objectivity
+
+                IMPORTANT: You MUST return a JSON object with the following structure:
+                {
+                    "topic": "Main topic of analysis",
+                    "summary": "Detailed Marxist analysis with citations",
+                    "tools_used": ["tool1", "tool2", "tool3"]
+                }"""),
                 ("human", "{query}")
             ])
             
-            # Try each provider until one works
-            for _ in range(len(self.llm_providers)):
-                provider = self._get_next_llm()
-                try:
-                    chain = analysis_prompt | provider['llm'] | self.parser
-                    analysis_response = await chain.ainvoke({
-                        "query": query,
-                        "context": json.dumps(research_data),
-                        "agent_scratchpad": []
-                    })
-                    
-                    if not analysis_response:
-                        raise ValueError("Empty response from LLM API")
-                        
-                    if not hasattr(analysis_response, 'topic') or not hasattr(analysis_response, 'summary'):
-                        raise ValueError(f"Invalid response structure from LLM API: {analysis_response}")
-
-                    # Add PDF links to the response
-                    response = {
-                        "topic": analysis_response.topic,
-                        "summary": analysis_response.summary,
-                        "tools_used": analysis_response.tools_used,
-                        "pdf_links": pdf_links
-                    }
-                    
-                    self.common_helpers.debug_to_discord(f"Successfully generated response using {provider['name']}")
-                    return response
-                    
-                except Exception as e:
-                    self.common_helpers.report_to_discord(f"Failed with {provider['name']}: {str(e)}, trying next provider...")
-                    # Add delay between attempts
-                    await asyncio.sleep(5)
-                    continue
+            self.common_helpers.debug_to_discord(f"Attempting to generate response with {provider['name']}")
             
-            raise Exception("All LLM providers failed")
+            # Format the prompt for all providers
+            formatted_prompt = analysis_prompt.format(
+                query=query,
+                context=json.dumps(research_data),
+                agent_scratchpad=[]
+            )
+            
+            # Handle HuggingFace models differently
+            if provider['name'].startswith('huggingface_'):
+                response_text = await provider['llm'].text_generation(
+                    prompt=formatted_prompt,
+                    max_new_tokens=4000,
+                    temperature=0.3,
+                    top_p=0.95,
+                    do_sample=True
+                )
+                # Parse the response as JSON
+                try:
+                    # Clean up the response text to ensure it's valid JSON
+                    response_text = response_text.strip()
+                    if response_text.startswith('```json'):
+                        response_text = response_text[7:]
+                    if response_text.endswith('```'):
+                        response_text = response_text[:-3]
+                    response_text = response_text.strip()
+                    
+                    response_dict = json.loads(response_text)
+                    analysis_response = Response(
+                        topic=response_dict['topic'],
+                        summary=response_dict['summary'],
+                        tools_used=response_dict['tools_used']
+                    )
+                except (json.JSONDecodeError, KeyError) as e:
+                    self.common_helpers.report_to_discord(f"Failed to parse HuggingFace response as JSON: {str(e)}")
+                    self.common_helpers.report_to_discord(f"Raw response: {response_text}")
+                    raise ValueError(f"Invalid JSON response from HuggingFace: {response_text}")
+            else:
+                # For other providers, use the chain but with the formatted prompt
+                chain = provider['llm'] | self.parser
+                analysis_response = await chain.ainvoke(formatted_prompt)
+            
+            if not analysis_response:
+                self.common_helpers.report_to_discord(f"Empty response from {provider['name']}")
+                raise ValueError("Empty response from LLM API")
+            
+            # Debug the response structure
+            self.common_helpers.debug_to_discord(f"Response type: {type(analysis_response)}")
+            self.common_helpers.debug_to_discord(f"Response attributes: {dir(analysis_response)}")
+            self.common_helpers.debug_to_discord(f"Response dict: {analysis_response.__dict__ if hasattr(analysis_response, '__dict__') else 'No __dict__'}")
+            
+            if not hasattr(analysis_response, 'topic') or not hasattr(analysis_response, 'summary'):
+                self.common_helpers.report_to_discord(f"Invalid response structure from {provider['name']}: {analysis_response}")
+                raise ValueError(f"Invalid response structure from LLM API: {analysis_response}")
+            # Add PDF links to the response
+            response = {
+                "topic": analysis_response.topic,
+                "summary": analysis_response.summary,
+                "tools_used": analysis_response.tools_used,
+                "pdf_links": pdf_links
+            }
+            
+            self.common_helpers.debug_to_discord(f"Successfully generated response using {provider['name']}")
+            return response
             
         except Exception as e:
-            self.common_helpers.report_to_discord(f"Error in generate_response: {str(e)}")
+            self.common_helpers.report_to_discord(f"Failed with {provider['name']}: {str(e)}")
             self.common_helpers.report_to_discord(f"Error type: {type(e).__name__}")
             self.common_helpers.report_to_discord(f"Error details: {str(e)}")
             raise

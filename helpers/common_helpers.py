@@ -83,6 +83,8 @@ class CommonHelpers:
                             "timestamp": datetime.now().isoformat()
                         }]
                     }
+                    # Add console logging
+                    print(f"[DEBUG] {debug_data.get('message', '')} - {debug_data.get('timestamp', '')}")
                 except json.JSONDecodeError:
                     # If JSON parsing fails, use the original message
                     formatted_message = {
@@ -93,6 +95,8 @@ class CommonHelpers:
                             "timestamp": datetime.now().isoformat()
                         }]
                     }
+                    # Add console logging
+                    print(f"[DEBUG] {message}")
             else:
                 # For other message types
                 formatted_message = {
@@ -103,15 +107,28 @@ class CommonHelpers:
                         "timestamp": datetime.now().isoformat()
                     }]
                 }
+                # Add console logging
+                print(f"[{error_type}] {message}")
 
             # Send to webhook if available
             if self.webhook_url:
-                requests.post(
-                    self.webhook_url,
-                    json=formatted_message
-                )
+                try:
+                    response = requests.post(
+                        self.webhook_url,
+                        json=formatted_message,
+                        timeout=5  # Add timeout
+                    )
+                    response.raise_for_status()  # Raise exception for non-200 status codes
+                    print(f"[INFO] Successfully sent message to Discord webhook")
+                except requests.exceptions.RequestException as e:
+                    print(f"[ERROR] Failed to send message to Discord webhook: {str(e)}")
+                    if hasattr(e.response, 'text'):
+                        print(f"[ERROR] Discord API response: {e.response.text}")
+            else:
+                print("[WARNING] No Discord webhook URL configured")
         except Exception as e:
             print(f"[ERROR] Failed to send error report to Discord: {str(e)}")
+            print(f"[ERROR] Message that failed to send: {message}")
 
     def debug_to_discord(self, message: str) -> None:
         """Send debug messages to Discord with additional context"""
