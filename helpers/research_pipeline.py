@@ -3,6 +3,8 @@ from typing import Dict, List, Any
 import requests
 from bs4 import BeautifulSoup
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_huggingface import HuggingFaceEndpoint
+from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser, StrOutputParser
 from pydantic import BaseModel, Field, ValidationError
@@ -30,14 +32,63 @@ class ResearchPipeline:
         # Configure Google API
         genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
         
-        # Use a single model for all operations
-        self.llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-pro",
-            temperature=0.3,
-            safety_settings={category: HarmBlockThreshold.BLOCK_NONE 
-                           for category in HarmCategory},
-            max_output_tokens=4000
-        )
+        # Initialize multiple LLM providers
+        self.llm_providers = []
+        
+        # Add Groq if API key is available (fastest option)
+        if os.getenv('GROQ_API_KEY'):
+            self.llm_providers.append({
+                'name': 'groq',
+                'llm': ChatGroq(
+                    model_name="mixtral-8x7b-32768",
+                    temperature=0.3,
+                    max_tokens=4000,
+                    groq_api_key=os.getenv('GROQ_API_KEY')
+                )
+            })
+        
+        # Add HuggingFace models if API key is available
+        if os.getenv('HUGGINGFACE_API_KEY'):
+            self.llm_providers.extend([
+                {
+                    'name': 'huggingface_mistral',
+                    'llm': HuggingFaceEndpoint(
+                        repo_id="mistralai/Mistral-7B-Instruct-v0.2",
+                        task="text-generation",
+                        temperature=0.3,
+                        max_new_tokens=4000,
+                        top_p=0.95,
+                        huggingfacehub_api_token=os.getenv('HUGGINGFACE_API_KEY')
+                    )
+                },
+                {
+                    'name': 'huggingface_llama',
+                    'llm': HuggingFaceEndpoint(
+                        repo_id="meta-llama/Llama-2-70b-chat-hf",
+                        task="text-generation",
+                        temperature=0.3,
+                        max_new_tokens=4000,
+                        top_p=0.95,
+                        huggingfacehub_api_token=os.getenv('HUGGINGFACE_API_KEY')
+                    )
+                }
+            ])
+        
+        # Add Gemini as final fallback
+        self.llm_providers.append({
+            'name': 'gemini',
+            'llm': ChatGoogleGenerativeAI(
+                model="gemini-1.5-pro",
+                temperature=0.3,
+                safety_settings={category: HarmBlockThreshold.BLOCK_NONE 
+                               for category in HarmCategory},
+                max_output_tokens=4000,
+                max_retries=0
+            )
+        })
+        
+        if not self.llm_providers:
+            raise ValueError("No LLM providers configured. Please set GROQ_API_KEY, HUGGINGFACE_API_KEY, or GEMINI_API_KEY")
         
         # Other initializations
         self.allowed_domains = [
@@ -46,6 +97,13 @@ class ResearchPipeline:
         ]
         self.headers = {'User-Agent': 'MarxistResearchBot/2.1'}
         self.parser = PydanticOutputParser(pydantic_object=Response)
+        self.current_provider_index = 0
+
+    def _get_next_llm(self):
+        """Get the next available LLM provider"""
+        provider = self.llm_providers[self.current_provider_index]
+        self.current_provider_index = (self.current_provider_index + 1) % len(self.llm_providers)
+        return provider
 
     async def optimize_search_query(self, query: str) -> str:
         """Optimizes the user's query for better search results"""
@@ -57,8 +115,24 @@ class ResearchPipeline:
             No explanations."""),
             ("human", "{query}")
         ])
-        chain = prompt | self.llm | StrOutputParser()
-        return await chain.ainvoke({"query": query})
+        
+        # Try each provider until one works
+        for _ in range(len(self.llm_providers)):
+            provider = self._get_next_llm()
+            try:
+                chain = prompt | provider['llm'] | StrOutputParser()
+                result = await chain.ainvoke({"query": query})
+                if result and isinstance(result, str) and len(result.strip()) > 0:
+                    self.common_helpers.debug_to_discord(f"Successfully optimized query using {provider['name']}")
+                    return result
+                raise ValueError("Empty or invalid response")
+            except Exception as e:
+                self.common_helpers.report_to_discord(f"Failed with {provider['name']}: {str(e)}, trying next provider...")
+                # Add delay between attempts
+                await asyncio.sleep(5)
+                continue
+        
+        raise Exception("All LLM providers failed")
 
     async def process_query(self, query: str) -> Dict:
         """Main pipeline that processes a user query from start to finish"""
@@ -197,35 +271,41 @@ class ResearchPipeline:
                 ("human", "{query}")
             ])
             
-            # Create a chain with the prompt and LLM
-            chain = analysis_prompt | self.llm | self.parser
-            
-            # Invoke the chain with the research data
-            self.common_helpers.debug_to_discord("Invoking Gemini API for analysis...")
-            analysis_response = await chain.ainvoke({
-                "query": query,
-                "context": json.dumps(research_data),
-                "agent_scratchpad": []
-            })
-            
-            self.common_helpers.debug_to_discord(f"Raw Gemini API response: {analysis_response}")
-            
-            if not analysis_response:
-                raise ValueError("Empty response from Gemini API")
-                
-            if not hasattr(analysis_response, 'topic') or not hasattr(analysis_response, 'summary'):
-                raise ValueError(f"Invalid response structure from Gemini API: {analysis_response}")
+            # Try each provider until one works
+            for _ in range(len(self.llm_providers)):
+                provider = self._get_next_llm()
+                try:
+                    chain = analysis_prompt | provider['llm'] | self.parser
+                    analysis_response = await chain.ainvoke({
+                        "query": query,
+                        "context": json.dumps(research_data),
+                        "agent_scratchpad": []
+                    })
+                    
+                    if not analysis_response:
+                        raise ValueError("Empty response from LLM API")
+                        
+                    if not hasattr(analysis_response, 'topic') or not hasattr(analysis_response, 'summary'):
+                        raise ValueError(f"Invalid response structure from LLM API: {analysis_response}")
 
-            # Add PDF links to the response
-            response = {
-                "topic": analysis_response.topic,
-                "summary": analysis_response.summary,
-                "tools_used": analysis_response.tools_used,
-                "pdf_links": pdf_links
-            }
+                    # Add PDF links to the response
+                    response = {
+                        "topic": analysis_response.topic,
+                        "summary": analysis_response.summary,
+                        "tools_used": analysis_response.tools_used,
+                        "pdf_links": pdf_links
+                    }
+                    
+                    self.common_helpers.debug_to_discord(f"Successfully generated response using {provider['name']}")
+                    return response
+                    
+                except Exception as e:
+                    self.common_helpers.report_to_discord(f"Failed with {provider['name']}: {str(e)}, trying next provider...")
+                    # Add delay between attempts
+                    await asyncio.sleep(5)
+                    continue
             
-            self.common_helpers.debug_to_discord(f"Final formatted response: {response}")
-            return response
+            raise Exception("All LLM providers failed")
             
         except Exception as e:
             self.common_helpers.report_to_discord(f"Error in generate_response: {str(e)}")
