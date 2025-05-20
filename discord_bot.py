@@ -32,7 +32,7 @@ async def on_message(message):
             query = message.content.replace(f'<@{client.user.id}>', '').strip()
             
             # Send initial response
-            await message.channel.send("🔍 Analyzing your query...")
+            await message.channel.send("🔍 Analyzing your query... This may take a few minutes.")
             
             # Make API request
             async with aiohttp.ClientSession() as session:
