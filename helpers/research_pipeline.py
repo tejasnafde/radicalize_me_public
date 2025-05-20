@@ -254,6 +254,19 @@ class ResearchPipeline:
                 - Cite specific sources for claims
                 - Maintain academic rigor and objectivity
 
+                REQUIRED OUTPUT FORMAT:
+                You MUST include ALL of these fields in your response:
+                - topic: The main subject of analysis
+                - summary: Your detailed Marxist analysis with citations
+                - tools_used: A list of at least 3 research methods/tools used (e.g., ["historical materialism", "dialectical analysis", "primary source analysis"])
+
+                EXAMPLE OUTPUT:
+                {
+                    "topic": "The Russian Revolution",
+                    "summary": "The Russian Revolution of 1917 was a pivotal moment in world history...",
+                    "tools_used": ["historical materialism", "dialectical analysis", "primary source analysis", "class analysis"]
+                }
+
                 YOUR TASK:
                 Analyze the query: {query}
 
@@ -286,25 +299,51 @@ class ResearchPipeline:
             # Handle HuggingFace models differently
             if provider['name'].startswith('huggingface_'):
                 self.common_helpers.debug_to_discord("Using HuggingFace model path...")
-                response_text = await provider['llm'].text_generation(
-                    prompt=formatted_prompt,
-                    max_new_tokens=4000,
-                    temperature=0.3,
-                    top_p=0.95,
-                    do_sample=True
-                )
-                self.common_helpers.debug_to_discord("Got response from HuggingFace model")
-                
-                # Log the raw response for debugging
-                self.common_helpers.debug_to_discord(f"Raw response from {provider['name']}: {response_text}")
-                
-                # Parse the response using the Pydantic parser
                 try:
-                    analysis_response = self.parser.parse(response_text)
+                    # Generate response with proper error handling
+                    response_text = await provider['llm'].text_generation(
+                        prompt=formatted_prompt,
+                        max_new_tokens=4000,
+                        temperature=0.3,
+                        top_p=0.95,
+                        do_sample=True,
+                        return_full_text=False  # Only return the generated text
+                    )
+                    
+                    if not response_text:
+                        raise ValueError("Empty response from HuggingFace model")
+                    
+                    self.common_helpers.debug_to_discord(f"Raw response from {provider['name']}: {response_text}")
+                    
+                    # Try to parse the response as JSON first
+                    try:
+                        response_dict = json.loads(response_text)
+                    except json.JSONDecodeError:
+                        # If not JSON, try to extract fields using regex
+                        topic_match = re.search(r'"topic":\s*"([^"]+)"', response_text)
+                        summary_match = re.search(r'"summary":\s*"([^"]+)"', response_text)
+                        tools_match = re.search(r'"tools_used":\s*\[(.*?)\]', response_text)
+                        
+                        if not all([topic_match, summary_match, tools_match]):
+                            raise ValueError("Could not extract required fields from response")
+                        
+                        response_dict = {
+                            "topic": topic_match.group(1),
+                            "summary": summary_match.group(1),
+                            "tools_used": [tool.strip(' "') for tool in tools_match.group(1).split(',')]
+                        }
+                    
+                    # Validate the response structure
+                    if not all(k in response_dict for k in ['topic', 'summary', 'tools_used']):
+                        raise ValueError(f"Missing required fields in response: {response_dict}")
+                    
+                    # Create Pydantic model
+                    analysis_response = Response(**response_dict)
+                    
                 except Exception as e:
-                    self.common_helpers.report_to_discord(f"Failed to parse HuggingFace response: {str(e)}")
+                    self.common_helpers.report_to_discord(f"Failed to process HuggingFace response: {str(e)}")
                     self.common_helpers.report_to_discord(f"Raw response: {response_text}")
-                    raise ValueError(f"Failed to parse HuggingFace response: {str(e)}")
+                    raise ValueError(f"Failed to process HuggingFace response: {str(e)}")
             else:
                 self.common_helpers.debug_to_discord("Using non-HuggingFace model path...")
                 # For other providers, use the chain with the parser
