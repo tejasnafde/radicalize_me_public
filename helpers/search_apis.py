@@ -122,14 +122,14 @@ class SearchAPIManager:
                     self.helpers.debug_to_discord(f"No results returned from {api}")
                     tried_apis.add(api)
             except Exception as e:
-                self.helpers.debug_to_discord(f"{api} search failed: {str(e)}")
-                self.helpers.debug_to_discord(f"Full error details: {type(e).__name__}: {str(e)}")
+                self.helpers.report_to_discord(f"{api} search failed: {str(e)}")
+                self.helpers.report_to_discord(f"Full error details: {type(e).__name__}: {str(e)}")
                 tried_apis.add(api)
                 retry_count += 1
                 await asyncio.sleep(2)  # Wait 2 seconds before trying next API
                 continue
                 
-        self.helpers.debug_to_discord("All search APIs failed after maximum retries")
+        self.helpers.report_to_discord("All search APIs failed after maximum retries")
         raise Exception("All search APIs failed after maximum retries")
 
     async def search_with_api(self, api: str, query: str) -> List[Dict]:
@@ -151,7 +151,7 @@ class SearchAPIManager:
                     "snippet": item["snippet"]
                 } for item in result.get("items", [])]
             except Exception as e:
-                self.helpers.debug_to_discord(f"Google search failed: {str(e)}")
+                self.helpers.report_to_discord(f"Google search failed: {str(e)}")
                 raise
             
         elif api == 'duckduckgo':
@@ -166,7 +166,7 @@ class SearchAPIManager:
                     "snippet": r["snippet"]
                 } for r in results]
             except Exception as e:
-                self.helpers.debug_to_discord(f"DuckDuckGo search failed: {str(e)}")
+                self.helpers.report_to_discord(f"DuckDuckGo search failed: {str(e)}")
                 raise
             
         elif api == 'serpapi':
@@ -185,7 +185,7 @@ class SearchAPIManager:
                 data = response.json()
                 
                 if "error" in data:
-                    self.helpers.debug_to_discord(f"SerpAPI returned error: {data['error']}")
+                    self.helpers.report_to_discord(f"SerpAPI returned error: {data['error']}")
                     raise Exception(f"SerpAPI error: {data['error']}")
                 
                 results = data.get("organic_results", [])
@@ -197,7 +197,7 @@ class SearchAPIManager:
                     "snippet": result.get("snippet", "")
                 } for result in results]
             except Exception as e:
-                self.helpers.debug_to_discord(f"SerpAPI search failed: {str(e)}")
+                self.helpers.report_to_discord(f"SerpAPI search failed: {str(e)}")
                 raise
             
         return []

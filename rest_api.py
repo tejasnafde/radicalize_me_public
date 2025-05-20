@@ -54,7 +54,7 @@ def start_keep_alive(app, helpers):
                     else:
                         helpers.debug_to_discord(f"Ping failed with status {response.status_code}")
             except Exception as e:
-                helpers.debug_to_discord(f"Ping error: {str(e)}")
+                helpers.report_to_discord(f"Ping error: {str(e)}")
             time.sleep(ping_interval)
     
     # Start the ping thread

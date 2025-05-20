@@ -59,7 +59,7 @@ async def on_message(message):
                         await message.channel.send(f"❌ Error: {error_text}")
                         
         except Exception as e:
-            helpers.debug_to_discord(f"Error processing message: {str(e)}")
+            helpers.report_to_discord(f"Error processing message: {str(e)}")
             await message.channel.send("❌ An error occurred while processing your request.")
 
 # Run the bot

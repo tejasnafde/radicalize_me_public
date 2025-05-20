@@ -187,7 +187,7 @@ class CommonHelpers:
             self.debug_to_discord("Health check successful")
             return True
         except Exception as e:
-            self.debug_to_discord(f"Health check failed: {str(e)}")
+            self.report_to_discord(f"Health check failed: {str(e)}")
             return False
 
     async def handle_api_error(self, error: Exception, retry_count: int = 0, max_retries: int = 3) -> bool:
@@ -196,20 +196,33 @@ class CommonHelpers:
             self.debug_to_discord(f"Max retries ({max_retries}) exceeded for API call")
             return False
 
+        error_str = str(error).lower()
+        
         # Check if it's a rate limit error
-        if "429" in str(error) or "quota" in str(error).lower():
+        if "429" in error_str or "quota" in error_str or "rate limit" in error_str:
             retry_delay = 40  # Default delay for rate limits
             try:
                 # Try to extract retry delay from error message
-                if "retry_delay" in str(error):
-                    retry_delay = int(str(error).split("seconds: ")[1].split("}")[0]) + 5
+                if "retry_delay" in error_str:
+                    retry_delay = int(error_str.split("seconds: ")[1].split("}")[0])
             except:
                 pass
             
             self.debug_to_discord(f"Rate limit hit, waiting {retry_delay} seconds before retry {retry_count + 1}/{max_retries}")
             await asyncio.sleep(retry_delay)
             return True
-
-        # For other errors, wait a shorter time
-        await asyncio.sleep(2 ** retry_count)  # Exponential backoff
-        return True
+            
+        # Check if it's a parsing or data structure error
+        if any(x in error_str for x in ["none", "subscriptable", "key", "index", "attribute"]):
+            self.debug_to_discord(f"Data structure error: {str(error)}")
+            return False
+            
+        # Check if it's a network error
+        if any(x in error_str for x in ["connection", "timeout", "network"]):
+            self.debug_to_discord(f"Network error: {str(error)}")
+            await asyncio.sleep(2 ** retry_count)  # Exponential backoff
+            return True
+            
+        # For other errors, log and don't retry
+        self.debug_to_discord(f"Unhandled error type: {str(error)}")
+        return False
