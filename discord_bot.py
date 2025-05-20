@@ -55,33 +55,38 @@ async def on_message(message):
                     if response.status == 200:
                         data = await response.json()
                         
-                        # Log the raw response data
-                        logger.info(f"Raw API response: {json.dumps(data, indent=2)}")
-                        helpers.debug_to_discord(f"Raw API response: {json.dumps(data, indent=2)}")
+                        # Log the raw response data for debugging
+                        logger.debug(f"Raw response data: {data}")
+                        helpers.debug_to_discord(f"Raw response data: {data}")
                         
-                        # Check if we have a valid response
-                        if not isinstance(data, dict) or 'message' not in data:
-                            logger.error("Invalid response format from API")
-                            raise ValueError("Invalid response format from API")
+                        # Extract message data with detailed logging
+                        message_data = data.get('message', {})
+                        logger.debug(f"Extracted message data: {message_data}")
+                        helpers.debug_to_discord(f"Extracted message data: {message_data}")
                         
-                        message_data = data['message']
-                        logger.info(f"Message data: {json.dumps(message_data, indent=2)}")
-                        helpers.debug_to_discord(f"Message data: {json.dumps(message_data, indent=2)}")
+                        # Check for required fields with detailed logging
+                        required_fields = ['topic', 'summary']
+                        missing_fields = [field for field in required_fields if field not in message_data]
                         
-                        # Check if we have an error
-                        if 'error' in message_data:
-                            logger.error(f"API returned error: {message_data['error']}")
-                            await message.channel.send(f"❌ Error: {message_data['error']}")
-                            return
+                        if missing_fields:
+                            error_msg = f"Missing required fields: {missing_fields}. Available fields: {list(message_data.keys())}"
+                            logger.error(error_msg)
+                            helpers.debug_to_discord(error_msg)
+                            raise ValueError(error_msg)
                         
-                        # Format the response
-                        if 'topic' in message_data and 'summary' in message_data:
+                        # Format response with detailed logging
+                        try:
                             response_text = f"**{message_data['topic']}**\n\n{message_data['summary']}\n\n"
+                            logger.debug(f"Base response formatted: {response_text[:100]}...")
                             
                             # Add PDF links section if available
                             if message_data.get('pdf_links'):
+                                logger.debug(f"Processing PDF links: {message_data['pdf_links']}")
                                 response_text += "\n**📚 Read More**\n"
                                 for pdf in message_data['pdf_links']:
+                                    if not isinstance(pdf, dict) or 'title' not in pdf or 'url' not in pdf:
+                                        logger.warning(f"Invalid PDF link format: {pdf}")
+                                        continue
                                     response_text += f"• [{pdf['title']}]({pdf['url']})\n"
                             
                             # Log the final formatted response
@@ -90,10 +95,12 @@ async def on_message(message):
                             
                             # Send the response
                             await message.channel.send(response_text)
-                        else:
-                            logger.error(f"Missing fields in message_data. Available fields: {list(message_data.keys())}")
-                            helpers.debug_to_discord(f"Missing fields in message_data. Available fields: {list(message_data.keys())}")
-                            raise ValueError("Missing required fields in response")
+                            
+                        except Exception as e:
+                            error_msg = f"Error formatting response: {str(e)}\nMessage data: {message_data}"
+                            logger.error(error_msg)
+                            helpers.debug_to_discord(error_msg)
+                            raise ValueError(error_msg)
                     else:
                         error_text = await response.text()
                         logger.error(f"API error response: {error_text}")
