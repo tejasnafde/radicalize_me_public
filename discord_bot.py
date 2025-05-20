@@ -100,7 +100,7 @@ async def on_message(message):
                             error_msg = f"Error formatting response: {str(e)}\nMessage data: {message_data}"
                             logger.error(error_msg)
                             helpers.debug_to_discord(error_msg)
-                            raise e
+                            raise ValueError(error_msg)
                     else:
                         error_text = await response.text()
                         logger.error(f"API error response: {error_text}")
