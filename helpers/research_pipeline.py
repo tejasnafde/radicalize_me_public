@@ -56,14 +56,20 @@ class ResearchPipeline:
             # 1. Optimize the query for better search results
             retry_count = 0
             max_retries = 3
+            optimized_query = None
+            
             while retry_count < max_retries:
                 try:
                     optimized_query = await self.optimize_search_query(query)
-                    break
+                    if optimized_query:
+                        break
                 except Exception as e:
                     if not await self.common_helpers.handle_api_error(e, retry_count, max_retries):
                         raise
                     retry_count += 1
+            
+            if not optimized_query:
+                raise ValueError("Failed to optimize query after maximum retries")
             
             # 2. Gather research data
             research_data = await self.gather_research_data(optimized_query, query)
@@ -73,18 +79,23 @@ class ResearchPipeline:
             while retry_count < max_retries:
                 try:
                     response = await self.generate_response(query, research_data)
-                    return response
+                    if response and isinstance(response, dict):
+                        return response
+                    raise ValueError("Invalid response format from generate_response")
                 except Exception as e:
                     if not await self.common_helpers.handle_api_error(e, retry_count, max_retries):
                         raise
                     retry_count += 1
             
+            raise ValueError("Failed to generate response after maximum retries")
+            
         except Exception as e:
-            self.common_helpers.debug_to_discord(f"Pipeline failed for query: {query} - {str(e)}")
+            self.common_helpers.report_to_discord(f"Pipeline failed for query: {query} - {str(e)}")
             return {
                 "topic": "Error",
                 "summary": f"Analysis failed: {str(e)}",
-                "tools_used": []
+                "tools_used": [],
+                "pdf_links": []
             }
     async def optimize_search_query(self, query: str) -> str:
         """Optimizes the user's query for better search results"""
@@ -117,58 +128,78 @@ class ResearchPipeline:
         }
     async def generate_response(self, query: str, research_data: Dict) -> Dict:
         """Generates a structured response based on research data"""
-        # Extract PDF links from research data
-        pdf_links = []
-        for source in research_data.get("sources", []):
-            if source.get("type") == "pdf":
-                pdf_links.append({
-                    "title": source.get("title", "PDF Document"),
-                    "url": source.get("url")
-                })
+        try:
+            # Extract PDF links from research data
+            pdf_links = []
+            for source in research_data.get("sources", []):
+                if source.get("type") == "pdf":
+                    pdf_links.append({
+                        "title": source.get("title", "PDF Document"),
+                        "url": source.get("url")
+                    })
 
-        analysis_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a Marxist historian and analyst. Analyze the provided research context using historical materialism and dialectical methods.
+            self.common_helpers.debug_to_discord(f"Generating response for query: {query}")
+            self.common_helpers.debug_to_discord(f"Research data sources: {len(research_data.get('sources', []))}")
+            
+            analysis_prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are a Marxist historian and analyst. Analyze the provided research context using historical materialism and dialectical methods.
 
-            RESEARCH CONTEXT:
-            {context}
+                RESEARCH CONTEXT:
+                {context}
 
-            ANALYSIS PROTOCOL:
-            1. Focus on primary sources and historical documents
-            2. Apply historical materialism and dialectical analysis
-            3. Cite sources with [Source#] notation
-            4. Avoid Cold War-era propaganda terms and biased language
-            5. Consider historical context and material conditions
-            6. Use the agent scratchpad for intermediate steps: {agent_scratchpad}
+                ANALYSIS PROTOCOL:
+                1. Focus on primary sources and historical documents
+                2. Apply historical materialism and dialectical analysis
+                3. Cite sources with [Source#] notation
+                4. Avoid Cold War-era propaganda terms and biased language
+                5. Consider historical context and material conditions
+                6. Use the agent scratchpad for intermediate steps: {agent_scratchpad}
 
-            GUIDELINES:
-            - Use historically accurate terminology
-            - Avoid sensationalist or propagandistic language
-            - Consider multiple perspectives and historical context
-            - Focus on material conditions and class analysis
-            - Cite specific sources for claims
-            - Maintain academic rigor and objectivity"""),
-            ("human", "{query}")
-        ])
-        
-        # Create a chain with the prompt and LLM
-        chain = analysis_prompt | self.response_generator | self.parser
-        
-        # Invoke the chain with the research data
-        analysis_response = await chain.ainvoke({
-            "query": query,
-            "context": json.dumps(research_data),
-            "agent_scratchpad": []
-        })       
+                GUIDELINES:
+                - Use historically accurate terminology
+                - Avoid sensationalist or propagandistic language
+                - Consider multiple perspectives and historical context
+                - Focus on material conditions and class analysis
+                - Cite specific sources for claims
+                - Maintain academic rigor and objectivity"""),
+                ("human", "{query}")
+            ])
+            
+            # Create a chain with the prompt and LLM
+            chain = analysis_prompt | self.response_generator | self.parser
+            
+            # Invoke the chain with the research data
+            self.common_helpers.debug_to_discord("Invoking Gemini API for analysis...")
+            analysis_response = await chain.ainvoke({
+                "query": query,
+                "context": json.dumps(research_data),
+                "agent_scratchpad": []
+            })
+            
+            self.common_helpers.debug_to_discord(f"Raw Gemini API response: {analysis_response}")
+            
+            if not analysis_response:
+                raise ValueError("Empty response from Gemini API")
+                
+            if not hasattr(analysis_response, 'topic') or not hasattr(analysis_response, 'summary'):
+                raise ValueError(f"Invalid response structure from Gemini API: {analysis_response}")
 
-        # Add PDF links to the response
-        response = {
-            "topic": analysis_response.topic,
-            "summary": analysis_response.summary,
-            "tools_used": analysis_response.tools_used,
-            "pdf_links": pdf_links
-        }
-
-        return response
+            # Add PDF links to the response
+            response = {
+                "topic": analysis_response.topic,
+                "summary": analysis_response.summary,
+                "tools_used": analysis_response.tools_used,
+                "pdf_links": pdf_links
+            }
+            
+            self.common_helpers.debug_to_discord(f"Final formatted response: {response}")
+            return response
+            
+        except Exception as e:
+            self.common_helpers.report_to_discord(f"Error in generate_response: {str(e)}")
+            self.common_helpers.report_to_discord(f"Error type: {type(e).__name__}")
+            self.common_helpers.report_to_discord(f"Error details: {str(e)}")
+            raise
     # Helper methods for web search, scraping, etc.
     async def web_search(self, query: str) -> List[Dict]:
         """Performs restricted web search with API rotation"""
@@ -183,7 +214,7 @@ class ResearchPipeline:
             return [r for r in results if any(d in r["link"] for d in self.allowed_domains)]
             
         except Exception as e:
-            self.common_helpers.debug_to_discord(f"Search failed after all retries: {str(e)}")
+            self.common_helpers.report_to_discord(f"Search failed after all retries: {str(e)}")
             return []
     async def scrape_urls(self, search_results: List[Dict]) -> List[Dict]:
         """Scrapes content from search results"""
@@ -241,7 +272,7 @@ class ResearchPipeline:
                 })
                 
             except Exception as e:
-                self.common_helpers.debug_to_discord(f"Error scraping {result['link']}: {str(e)}")
+                self.common_helpers.report_to_discord(f"Error scraping {result['link']}: {str(e)}")
                 # Add the result with just the snippet if scraping fails
                 scraped_content.append({
                     "url": result["link"],
@@ -292,7 +323,7 @@ class ResearchPipeline:
                                 sources.append(f"https://reddit.com{comment.permalink}")
                 
                 except Exception as e:
-                    self.common_helpers.debug_to_discord(f"Error searching subreddit {sub}: {str(e)}")
+                    self.common_helpers.report_to_discord(f"Error searching subreddit {sub}: {str(e)}")
                     continue
             
             return {
@@ -302,7 +333,7 @@ class ResearchPipeline:
             }
             
         except Exception as e:
-            self.common_helpers.debug_to_discord(f"Reddit search failed: {str(e)}")
+            self.common_helpers.report_to_discord(f"Reddit search failed: {str(e)}")
             return {
                 "content": f"Reddit error: {str(e)}",
                 "sources": [],
