@@ -22,6 +22,7 @@ services:
       - DISCORD_ERROR_WEBHOOK_URL=${DISCORD_ERROR_WEBHOOK_URL}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY}
+      - PYTHONUNBUFFERED=1  # Ensure Python output is not buffered
     volumes:
       - .:/app
     healthcheck:
@@ -29,3 +30,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"

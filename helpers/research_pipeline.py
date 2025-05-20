@@ -170,7 +170,14 @@ class ResearchPipeline:
                     response = await self.generate_response(query, research_data, provider)
                     if response and isinstance(response, dict):
                         self.common_helpers.debug_to_discord(f"Successfully generated response using {provider['name']}")
-                        return response
+                        # Convert dict to Pydantic model before returning
+                        try:
+                            response_model = Response(**response)
+                            self.common_helpers.debug_to_discord(f"Response converted to Pydantic model: {response_model}")
+                            return response_model
+                        except Exception as e:
+                            self.common_helpers.report_to_discord(f"Failed to convert response to Pydantic model: {str(e)}")
+                            raise ValueError(f"Invalid response format: {str(e)}")
                     self.common_helpers.debug_to_discord(f"Invalid response format from {provider['name']}")
                     raise ValueError("Invalid response format from generate_response")
                 except Exception as e:
@@ -207,10 +214,11 @@ class ResearchPipeline:
             "sources": scraped_content,
             "reddit_content": reddit_results
         }
-
     async def generate_response(self, query: str, research_data: Dict, provider: Dict) -> Dict:
         """Generates a structured response based on research data"""
         try:
+            self.common_helpers.debug_to_discord("=== Starting generate_response ===")
+            
             # Extract PDF links from research data
             pdf_links = []
             for source in research_data.get("sources", []):
@@ -219,10 +227,11 @@ class ResearchPipeline:
                         "title": source.get("title", "PDF Document"),
                         "url": source.get("url")
                     })
-
             self.common_helpers.debug_to_discord(f"Generating response for query: {query}")
             self.common_helpers.debug_to_discord(f"Research data sources: {len(research_data.get('sources', []))}")
             
+            self.common_helpers.debug_to_discord("Creating analysis prompt template...")
+            # Create the prompt template with proper output formatting
             analysis_prompt = ChatPromptTemplate.from_messages([
                 ("system", """You are a Marxist historian and analyst. Analyze the provided research context using historical materialism and dialectical methods.
 
@@ -245,26 +254,38 @@ class ResearchPipeline:
                 - Cite specific sources for claims
                 - Maintain academic rigor and objectivity
 
-                IMPORTANT: You MUST return a JSON object with the following structure:
-                {
-                    "topic": "Main topic of analysis",
-                    "summary": "Detailed Marxist analysis with citations",
-                    "tools_used": ["tool1", "tool2", "tool3"]
-                }"""),
+                YOUR TASK:
+                Analyze the query: {query}
+
+                {format_instructions}"""),
                 ("human", "{query}")
             ])
             
+            self.common_helpers.debug_to_discord("Analysis prompt template created successfully")
             self.common_helpers.debug_to_discord(f"Attempting to generate response with {provider['name']}")
             
+            self.common_helpers.debug_to_discord("About to format prompt...")
             # Format the prompt for all providers
-            formatted_prompt = analysis_prompt.format(
-                query=query,
-                context=json.dumps(research_data),
-                agent_scratchpad=[]
-            )
+            try:
+                formatted_prompt = analysis_prompt.format(
+                    query=query,
+                    context=json.dumps(research_data),
+                    agent_scratchpad=[],
+                    format_instructions=self.parser.get_format_instructions()
+                )
+                self.common_helpers.debug_to_discord("Prompt formatted successfully")
+            except Exception as e:
+                self.common_helpers.report_to_discord(f"Error formatting prompt: {str(e)}")
+                self.common_helpers.report_to_discord(f"Error type: {type(e).__name__}")
+                self.common_helpers.report_to_discord(f"Prompt template variables: query={query}, context={json.dumps(research_data)[:100]}...")
+                raise
+            
+            # Log the formatted prompt for debugging
+            self.common_helpers.debug_to_discord(f"Formatted prompt for {provider['name']}: {formatted_prompt}")
             
             # Handle HuggingFace models differently
             if provider['name'].startswith('huggingface_'):
+                self.common_helpers.debug_to_discord("Using HuggingFace model path...")
                 response_text = await provider['llm'].text_generation(
                     prompt=formatted_prompt,
                     max_new_tokens=4000,
@@ -272,30 +293,30 @@ class ResearchPipeline:
                     top_p=0.95,
                     do_sample=True
                 )
-                # Parse the response as JSON
+                self.common_helpers.debug_to_discord("Got response from HuggingFace model")
+                
+                # Log the raw response for debugging
+                self.common_helpers.debug_to_discord(f"Raw response from {provider['name']}: {response_text}")
+                
+                # Parse the response using the Pydantic parser
                 try:
-                    # Clean up the response text to ensure it's valid JSON
-                    response_text = response_text.strip()
-                    if response_text.startswith('```json'):
-                        response_text = response_text[7:]
-                    if response_text.endswith('```'):
-                        response_text = response_text[:-3]
-                    response_text = response_text.strip()
-                    
-                    response_dict = json.loads(response_text)
-                    analysis_response = Response(
-                        topic=response_dict['topic'],
-                        summary=response_dict['summary'],
-                        tools_used=response_dict['tools_used']
-                    )
-                except (json.JSONDecodeError, KeyError) as e:
-                    self.common_helpers.report_to_discord(f"Failed to parse HuggingFace response as JSON: {str(e)}")
+                    analysis_response = self.parser.parse(response_text)
+                except Exception as e:
+                    self.common_helpers.report_to_discord(f"Failed to parse HuggingFace response: {str(e)}")
                     self.common_helpers.report_to_discord(f"Raw response: {response_text}")
-                    raise ValueError(f"Invalid JSON response from HuggingFace: {response_text}")
+                    raise ValueError(f"Failed to parse HuggingFace response: {str(e)}")
             else:
-                # For other providers, use the chain but with the formatted prompt
+                self.common_helpers.debug_to_discord("Using non-HuggingFace model path...")
+                # For other providers, use the chain with the parser
                 chain = provider['llm'] | self.parser
-                analysis_response = await chain.ainvoke(formatted_prompt)
+                try:
+                    self.common_helpers.debug_to_discord("About to invoke chain...")
+                    analysis_response = await chain.ainvoke(formatted_prompt)
+                    self.common_helpers.debug_to_discord("Chain invoked successfully")
+                except Exception as e:
+                    self.common_helpers.report_to_discord(f"Error in chain.ainvoke: {str(e)}")
+                    self.common_helpers.report_to_discord(f"Formatted prompt that caused error: {formatted_prompt}")
+                    raise
             
             if not analysis_response:
                 self.common_helpers.report_to_discord(f"Empty response from {provider['name']}")
@@ -318,6 +339,7 @@ class ResearchPipeline:
             }
             
             self.common_helpers.debug_to_discord(f"Successfully generated response using {provider['name']}")
+            self.common_helpers.debug_to_discord(f"Response generated using {provider['name']}: {response}")
             return response
             
         except Exception as e:
