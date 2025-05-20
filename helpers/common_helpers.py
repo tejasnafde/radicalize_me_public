@@ -7,6 +7,16 @@ import requests
 import praw
 import asyncio
 from functools import lru_cache
+import logging
+import sys
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stdout  # Ensure logs go to stdout for Docker
+)
+logger = logging.getLogger(__name__)
 
 class CommonHelpers:
     def __init__(self):
@@ -46,19 +56,23 @@ class CommonHelpers:
         if missing:
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
-    def create_response(self, status: int, result: Any, message: str = "") -> Dict:
-        """Create a standardized response format"""
-        resp = {
-            "message": message if status == 200 else result
+    def create_response(self, status_code: int, message: Any) -> Dict[str, Any]:
+        """Create a standardized response"""
+        if isinstance(message, dict):
+            # If message is already a dict with status, use it directly
+            if "status" in message:
+                return {
+                    "status": message["status"],
+                    "status_code": status_code,
+                    "message": message
+                }
+        
+        # Otherwise create a new response structure
+        return {
+            "status": "success" if status_code < 400 else "error",
+            "status_code": status_code,
+            "message": message
         }
-        if status == 200:
-            if isinstance(result, list):
-                resp["list"] = result
-            elif isinstance(result, dict):
-                resp.update(result)
-            elif isinstance(result, str):
-                resp["message"] = result
-        return resp
 
     def handle_exceptions(self, error: Exception, user_id: Optional[str] = None) -> None:
         """Handle exceptions and report them to Discord"""
@@ -70,6 +84,14 @@ class CommonHelpers:
     def report_to_discord(self, message: str, error_type: str = "ERROR") -> None:
         """Send error/debug messages to Discord channel"""
         try:
+            # Log to Docker first
+            if error_type == "DEBUG":
+                logger.debug(message)
+            elif error_type == "INFO":
+                logger.info(message)
+            else:
+                logger.error(message)
+
             # Format the message based on type
             if error_type == "DEBUG" and isinstance(message, str) and message.startswith("{"):
                 # Parse JSON debug message
@@ -84,7 +106,7 @@ class CommonHelpers:
                         }]
                     }
                     # Add console logging
-                    print(f"[DEBUG] {debug_data.get('message', '')} - {debug_data.get('timestamp', '')}")
+                    logger.debug(f"[DEBUG] {debug_data.get('message', '')} - {debug_data.get('timestamp', '')}")
                 except json.JSONDecodeError:
                     # If JSON parsing fails, use the original message
                     formatted_message = {
@@ -96,7 +118,7 @@ class CommonHelpers:
                         }]
                     }
                     # Add console logging
-                    print(f"[DEBUG] {message}")
+                    logger.debug(f"[DEBUG] {message}")
             else:
                 # For other message types
                 formatted_message = {
@@ -108,7 +130,10 @@ class CommonHelpers:
                     }]
                 }
                 # Add console logging
-                print(f"[{error_type}] {message}")
+                if error_type == "ERROR":
+                    logger.error(f"[{error_type}] {message}")
+                else:
+                    logger.info(f"[{error_type}] {message}")
 
             # Send to webhook if available
             if self.webhook_url:
@@ -119,16 +144,16 @@ class CommonHelpers:
                         timeout=5  # Add timeout
                     )
                     response.raise_for_status()  # Raise exception for non-200 status codes
-                    print(f"[INFO] Successfully sent message to Discord webhook")
+                    logger.info(f"[INFO] Successfully sent message to Discord webhook")
                 except requests.exceptions.RequestException as e:
-                    print(f"[ERROR] Failed to send message to Discord webhook: {str(e)}")
+                    logger.error(f"[ERROR] Failed to send message to Discord webhook: {str(e)}")
                     if hasattr(e.response, 'text'):
-                        print(f"[ERROR] Discord API response: {e.response.text}")
+                        logger.error(f"[ERROR] Discord API response: {e.response.text}")
             else:
-                print("[WARNING] No Discord webhook URL configured")
+                logger.warning("[WARNING] No Discord webhook URL configured")
         except Exception as e:
-            print(f"[ERROR] Failed to send error report to Discord: {str(e)}")
-            print(f"[ERROR] Message that failed to send: {message}")
+            logger.error(f"[ERROR] Failed to send error report to Discord: {str(e)}")
+            logger.error(f"[ERROR] Message that failed to send: {message}")
 
     def debug_to_discord(self, message: str) -> None:
         """Send debug messages to Discord with additional context"""
