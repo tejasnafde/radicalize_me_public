@@ -64,12 +64,24 @@ async def on_message(message):
                         logger.debug(f"Extracted message data: {message_data}")
                         helpers.debug_to_discord(f"Extracted message data: {message_data}")
                         
+                        # Validate message data structure
+                        if not message_data:
+                            error_msg = "Empty message data received from API"
+                            logger.error(error_msg)
+                            helpers.debug_to_discord(error_msg)
+                            raise ValueError(error_msg)
+                        
                         # Check for required fields with detailed logging
                         required_fields = ['topic', 'summary']
                         missing_fields = [field for field in required_fields if field not in message_data]
                         
                         if missing_fields:
-                            error_msg = f"Missing required fields: {missing_fields}. Available fields: {list(message_data.keys())}"
+                            error_msg = (
+                                f"Missing required fields in API response:\n"
+                                f"- Missing fields: {missing_fields}\n"
+                                f"- Available fields: {list(message_data.keys())}\n"
+                                f"- Raw message data: {message_data}"
+                            )
                             logger.error(error_msg)
                             helpers.debug_to_discord(error_msg)
                             raise ValueError(error_msg)

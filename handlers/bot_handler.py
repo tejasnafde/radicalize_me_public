@@ -25,7 +25,7 @@ class BotHandler:
             result = await self.research_pipeline.process_query(query)
             
             # Log the raw response for debugging
-            logger.debug(f"Raw response from pipeline: {result}")
+            self.common_helpers.debug_to_discord(f"Raw response from pipeline: {result}")
             
             # Get the data from either Pydantic model or dict
             if hasattr(result, 'dict'):
@@ -35,7 +35,7 @@ class BotHandler:
             else:
                 raise ValueError(f"Unexpected response type: {type(result)}")
             
-            logger.debug(f"Processed result dict: {result_dict}")
+            self.common_helpers.debug_to_discord(f"Processed result dict: {result_dict}")
             
             # Format the response
             formatted_content = f"## {result_dict['topic']}\n\n{result_dict['summary']}"
@@ -45,7 +45,7 @@ class BotHandler:
                 formatted_content += "\n\n**Sources:**\n"
                 for tool in result_dict['tools_used']:
                     formatted_content += f"- {tool}\n"
-            
+            self.common_helpers.debug_to_discord(f"Formatted content: {formatted_content}")
             # Create response with all required fields
             message = {
                 "content": formatted_content,
@@ -53,14 +53,15 @@ class BotHandler:
                 "timestamp": datetime.now().isoformat(),
                 "topic": result_dict['topic'],
                 "summary": result_dict['summary'],
-                "status": "success"
+                "status": "success",
+                "pdf_links": result_dict.get('pdf_links', [])
             }
             
-            logger.debug(f"Formatted message: {message}")
+            self.common_helpers.debug_to_discord(f"Formatted message: {message}")
             return self.common_helpers.create_response(200, message)
             
         except Exception as e:
-            logger.error(f"Bot request handling failed: {str(e)}")
+            self.common_helpers.debug_to_discord(f"Bot request handling failed: {str(e)}")
             self.common_helpers.handle_exceptions(e, user_id)
             error_message = {
                 "content": f"Error processing request: {str(e)}",
@@ -68,6 +69,7 @@ class BotHandler:
                 "timestamp": datetime.now().isoformat(),
                 "topic": "Error",
                 "summary": f"An error occurred: {str(e)}",
-                "status": "error"
+                "status": "error",
+                "pdf_links": []
             }
             return self.common_helpers.create_response(500, error_message)
