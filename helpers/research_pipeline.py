@@ -11,6 +11,7 @@ from .common_helpers import CommonHelpers
 import re
 from .search_apis import SearchAPIManager
 import asyncio
+import os
 
 class Response(BaseModel):
     topic: str = Field(description="Main topic of analysis")
@@ -25,18 +26,11 @@ class ResearchPipeline:
         self.common_helpers = CommonHelpers()  # This will validate env vars
         self.search_manager = SearchAPIManager()  # Add this line
         
-        # Query optimization LLM
-        self.query_optimizer = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
-            temperature=0.2,
-            safety_settings={category: HarmBlockThreshold.BLOCK_NONE 
-                           for category in HarmCategory}
-        )
-        
-        # Response generation LLM
-        self.response_generator = ChatGoogleGenerativeAI(
+        # Use a single model for all operations
+        self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-pro",
             temperature=0.3,
+            google_api_key=os.getenv('GEMINI_API_KEY'),
             safety_settings={category: HarmBlockThreshold.BLOCK_NONE 
                            for category in HarmCategory},
             max_output_tokens=4000
@@ -50,6 +44,19 @@ class ResearchPipeline:
         self.headers = {'User-Agent': 'MarxistResearchBot/2.1'}
         self.parser = PydanticOutputParser(pydantic_object=Response)
 
+    async def optimize_search_query(self, query: str) -> str:
+        """Optimizes the user's query for better search results"""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a Marxist research assistant. Optimize search queries for historical research.
+            Focus on primary sources, academic works, and historical documents.
+            Avoid Cold War-era propaganda terms and biased language.
+            Output ONLY the optimized search query - maximum 100 characters.
+            No explanations."""),
+            ("human", "{query}")
+        ])
+        chain = prompt | self.llm | StrOutputParser()
+        return await chain.ainvoke({"query": query})
+
     async def process_query(self, query: str) -> Dict:
         """Main pipeline that processes a user query from start to finish"""
         try:
@@ -62,6 +69,8 @@ class ResearchPipeline:
                 try:
                     optimized_query = await self.optimize_search_query(query)
                     if optimized_query:
+                        # Add delay after query optimization
+                        await asyncio.sleep(10)  # Wait 10 seconds before next API call
                         break
                 except Exception as e:
                     if not await self.common_helpers.handle_api_error(e, retry_count, max_retries):
@@ -97,18 +106,7 @@ class ResearchPipeline:
                 "tools_used": [],
                 "pdf_links": []
             }
-    async def optimize_search_query(self, query: str) -> str:
-        """Optimizes the user's query for better search results"""
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a Marxist research assistant. Optimize search queries for historical research.
-            Focus on primary sources, academic works, and historical documents.
-            Avoid Cold War-era propaganda terms and biased language.
-            Output ONLY the optimized search query - maximum 100 characters.
-            No explanations."""),
-            ("human", "{query}")
-        ])
-        chain = prompt | self.query_optimizer | StrOutputParser()
-        return await chain.ainvoke({"query": query})
+
     async def gather_research_data(self, optimized_query: str, original_query: str) -> Dict:
         """Gathers research data from web and Reddit"""
         # Web search
@@ -126,6 +124,7 @@ class ResearchPipeline:
             "sources": scraped_content,
             "reddit_content": reddit_results
         }
+
     async def generate_response(self, query: str, research_data: Dict) -> Dict:
         """Generates a structured response based on research data"""
         try:
@@ -166,7 +165,7 @@ class ResearchPipeline:
             ])
             
             # Create a chain with the prompt and LLM
-            chain = analysis_prompt | self.response_generator | self.parser
+            chain = analysis_prompt | self.llm | self.parser
             
             # Invoke the chain with the research data
             self.common_helpers.debug_to_discord("Invoking Gemini API for analysis...")
@@ -200,6 +199,7 @@ class ResearchPipeline:
             self.common_helpers.report_to_discord(f"Error type: {type(e).__name__}")
             self.common_helpers.report_to_discord(f"Error details: {str(e)}")
             raise
+
     # Helper methods for web search, scraping, etc.
     async def web_search(self, query: str) -> List[Dict]:
         """Performs restricted web search with API rotation"""
@@ -216,6 +216,7 @@ class ResearchPipeline:
         except Exception as e:
             self.common_helpers.report_to_discord(f"Search failed after all retries: {str(e)}")
             return []
+
     async def scrape_urls(self, search_results: List[Dict]) -> List[Dict]:
         """Scrapes content from search results"""
         scraped_content = []
@@ -284,6 +285,7 @@ class ResearchPipeline:
                 continue
                 
         return scraped_content
+
     async def reddit_search(self, query: str) -> Dict:
         """Searches Reddit for relevant discussions"""
         try:
@@ -339,6 +341,7 @@ class ResearchPipeline:
                 "sources": [],
                 "tool_name": "error in reddit_search"
             }
+
     def format_response(self, analysis_response: str) -> Dict:
         """Formats the analysis response"""
         try:
