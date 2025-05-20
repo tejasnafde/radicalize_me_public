@@ -268,9 +268,7 @@ class ResearchPipeline:
                 }
 
                 YOUR TASK:
-                Analyze the query: {query}
-
-                {format_instructions}"""),
+                Analyze the query: {query}"""),
                 ("human", "{query}")
             ])
             
@@ -283,8 +281,7 @@ class ResearchPipeline:
                 formatted_prompt = analysis_prompt.format(
                     query=query,
                     context=json.dumps(research_data),
-                    agent_scratchpad=[],
-                    format_instructions=self.parser.get_format_instructions()
+                    agent_scratchpad=[]
                 )
                 self.common_helpers.debug_to_discord("Prompt formatted successfully")
             except Exception as e:
