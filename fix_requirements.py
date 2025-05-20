@@ -5,7 +5,7 @@ from collections import defaultdict
 
 def get_available_versions(package_name):
     try:
-        print(f"Checking versions for {package_name}...")  # Debug print
+        print(f"Checking versions for {package_name}...")
         result = subprocess.run(
             [sys.executable, "-m", "pip", "index", "versions", package_name],
             capture_output=True,
@@ -16,96 +16,106 @@ def get_available_versions(package_name):
             for line in result.stdout.split('\n'):
                 if 'Available versions:' in line:
                     versions = line.split(':')[1].strip().split(', ')
-            print(f"Found versions for {package_name}: {versions}")  # Debug print
+            print(f"Found versions for {package_name}: {versions}")
             return versions
-        print(f"No versions found for {package_name}")  # Debug print
+        print(f"No versions found for {package_name}")
         return []
     except Exception as e:
-        print(f"Error checking versions for {package_name}: {str(e)}")  # Debug print
+        print(f"Error checking versions for {package_name}: {str(e)}")
         return []
 
-def fix_requirements():
-    print("Starting requirements check...")  # Debug print
-    try:
-        with open('requirements.txt', 'r') as f:
-            requirements = f.readlines()
-        print(f"Found {len(requirements)} requirements in requirements.txt")  # Debug print
-    except Exception as e:
-        print(f"Error reading requirements.txt: {str(e)}")
-        return
-
-    fixed_requirements = []
-    issues = defaultdict(list)
-
-    for req in requirements:
-        req = req.strip()
-        if not req:
-            continue
-
-        print(f"\nProcessing requirement: {req}")  # Debug print
-        try:
-            package_name = req.split('==')[0]
-            current_version = req.split('==')[1] if '==' in req else None
-            print(f"Package: {package_name}, Current version: {current_version}")  # Debug print
-
-            if current_version:
-                available_versions = get_available_versions(package_name)
-                if available_versions:
-                    latest_version = available_versions[0]
-                    print(f"Latest version available: {latest_version}")  # Debug print
-                    if version.parse(current_version) > version.parse(latest_version):
-                        fixed_req = f"{package_name}=={latest_version}"
-                        issues['version_mismatch'].append({
-                            'package': package_name,
-                            'current': current_version,
-                            'latest': latest_version
-                        })
-                        fixed_requirements.append(fixed_req)
-                        continue
-                else:
-                    issues['no_versions'].append({
-                        'package': package_name,
-                        'current': current_version
+def analyze_langchain_dependencies():
+    print("\nAnalyzing LangChain package dependencies...")
+    
+    # Core packages to analyze
+    packages = {
+        'langchain': None,
+        'langchain-community': None,
+        'langchain-core': None,
+        'langchain-google-genai': None,
+        'langchain-huggingface': None,
+        'langchain-groq': None,
+        'langchain-text-splitters': None
+    }
+    
+    # Get available versions for each package
+    for package in packages:
+        versions = get_available_versions(package)
+        if versions:
+            packages[package] = versions
+            print(f"\n{package} versions:")
+            for v in versions[:5]:  # Show first 5 versions
+                print(f"  - {v}")
+    
+    # Analyze core dependencies
+    print("\nAnalyzing core dependencies...")
+    core_versions = packages['langchain-core']
+    if core_versions:
+        print("\nLangChain Core version requirements:")
+        print("-----------------------------------")
+        for package, versions in packages.items():
+            if package != 'langchain-core' and versions:
+                print(f"\n{package}:")
+                # Check each version's requirements
+                for v in versions[:3]:  # Check first 3 versions
+                    try:
+                        result = subprocess.run(
+                            [sys.executable, "-m", "pip", "show", f"{package}=={v}"],
+                            capture_output=True,
+                            text=True
+                        )
+                        if result.returncode == 0:
+                            for line in result.stdout.split('\n'):
+                                if 'Requires:' in line:
+                                    print(f"  {v}: {line.split('Requires:')[1].strip()}")
+                    except Exception as e:
+                        print(f"  Error checking {v}: {str(e)}")
+    
+    # Find compatible version combinations
+    print("\nSearching for compatible version combinations...")
+    compatible_combinations = []
+    
+    # Start with older versions of langchain-core that might work with groq
+    for core_version in core_versions:
+        if version.parse(core_version) < version.parse('0.2.0'):
+            print(f"\nTrying langchain-core {core_version}...")
+            try:
+                # Create a test requirements file
+                test_reqs = [
+                    f"langchain-core=={core_version}",
+                    "langchain-groq==0.1.0"
+                ]
+                
+                with open('test_requirements.txt', 'w') as f:
+                    f.write('\n'.join(test_reqs))
+                
+                # Try installing
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-r", "test_requirements.txt"],
+                    capture_output=True,
+                    text=True
+                )
+                
+                if result.returncode == 0:
+                    print(f"Found compatible combination with langchain-core {core_version}")
+                    compatible_combinations.append({
+                        'langchain-core': core_version,
+                        'langchain-groq': '0.1.0'
                     })
-
-            fixed_requirements.append(req)
-        except Exception as e:
-            print(f"Error processing {req}: {str(e)}")  # Debug print
-            issues['error'].append({
-                'package': package_name if 'package_name' in locals() else req,
-                'error': str(e)
-            })
-            fixed_requirements.append(req)
-
-    # Write fixed requirements
-    print("\nWriting fixed requirements to requirements.txt...")  # Debug print
-    with open('requirements.txt', 'w') as f:
-        f.write('\n'.join(fixed_requirements))
-
-    # Print detailed report
-    print("\nRequirements Analysis Report")
-    print("==========================")
+            except Exception as e:
+                print(f"Error testing combination: {str(e)}")
     
-    if issues['version_mismatch']:
-        print("\nVersion Mismatches (Current > Latest):")
-        print("-------------------------------------")
-        for issue in issues['version_mismatch']:
-            print(f"- {issue['package']}: {issue['current']} → {issue['latest']}")
-    
-    if issues['no_versions']:
-        print("\nPackages with No Available Versions:")
-        print("----------------------------------")
-        for issue in issues['no_versions']:
-            print(f"- {issue['package']} (current: {issue['current']})")
-    
-    if issues['error']:
-        print("\nErrors Processing Packages:")
-        print("-------------------------")
-        for issue in issues['error']:
-            print(f"- {issue['package']}: {issue['error']}")
-    
-    if not any(issues.values()):
-        print("\nNo issues found! All requirements are up to date.")
+    if compatible_combinations:
+        print("\nCompatible version combinations found:")
+        print("-----------------------------------")
+        for combo in compatible_combinations:
+            print(f"\nCombination {combo}")
+            print("To use this combination, update requirements.txt with:")
+            print(f"langchain-core=={combo['langchain-core']}")
+            print("langchain-groq==0.1.0")
+    else:
+        print("\nNo compatible combinations found that include Groq.")
+        print("Consider using an alternative to Groq or updating the Groq package to support newer LangChain versions.")
 
 if __name__ == "__main__":
-    fix_requirements()
+    analyze_langchain_dependencies()
