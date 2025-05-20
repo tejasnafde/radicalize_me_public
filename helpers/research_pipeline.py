@@ -12,6 +12,7 @@ import re
 from .search_apis import SearchAPIManager
 import asyncio
 import os
+import google.generativeai as genai
 
 class Response(BaseModel):
     topic: str = Field(description="Main topic of analysis")
@@ -26,11 +27,13 @@ class ResearchPipeline:
         self.common_helpers = CommonHelpers()  # This will validate env vars
         self.search_manager = SearchAPIManager()  # Add this line
         
+        # Configure Google API
+        genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+        
         # Use a single model for all operations
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-1.5-pro",
             temperature=0.3,
-            google_api_key=os.getenv('GEMINI_API_KEY'),
             safety_settings={category: HarmBlockThreshold.BLOCK_NONE 
                            for category in HarmCategory},
             max_output_tokens=4000
@@ -73,6 +76,21 @@ class ResearchPipeline:
                         await asyncio.sleep(10)  # Wait 10 seconds before next API call
                         break
                 except Exception as e:
+                    # Extract retry delay from error message if available
+                    retry_delay = 15  # Default delay (5 + 10 buffer)
+                    if hasattr(e, 'response') and hasattr(e.response, 'json'):
+                        try:
+                            error_data = e.response.json()
+                            if 'retry_delay' in error_data:
+                                api_delay = int(error_data['retry_delay'].get('seconds', 5))
+                                buffer = 10
+                                retry_delay = api_delay + buffer  # Add 10 second buffer
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    self.common_helpers.debug_to_discord(f"Rate limit hit, waiting {retry_delay} seconds before retry {retry_count + 1}/{max_retries}")
+                    await asyncio.sleep(retry_delay)
+                    
                     if not await self.common_helpers.handle_api_error(e, retry_count, max_retries):
                         raise
                     retry_count += 1
@@ -92,6 +110,21 @@ class ResearchPipeline:
                         return response
                     raise ValueError("Invalid response format from generate_response")
                 except Exception as e:
+                    # Extract retry delay from error message if available
+                    retry_delay = 15  # Default delay (5 + 10 buffer)
+                    if hasattr(e, 'response') and hasattr(e.response, 'json'):
+                        try:
+                            error_data = e.response.json()
+                            if 'retry_delay' in error_data:
+                                api_delay = int(error_data['retry_delay'].get('seconds', 5))
+                                buffer = 10
+                                retry_delay = api_delay + buffer  # Add 10 second buffer
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    self.common_helpers.debug_to_discord(f"Rate limit hit, waiting {retry_delay} seconds before retry {retry_count + 1}/{max_retries}")
+                    await asyncio.sleep(retry_delay)
+                    
                     if not await self.common_helpers.handle_api_error(e, retry_count, max_retries):
                         raise
                     retry_count += 1
