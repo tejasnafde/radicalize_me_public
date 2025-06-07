@@ -21,6 +21,11 @@ try:
 except ImportError:
     from typing_extensions import Annotated
 
+# Import the unified logger
+from helpers.logger import get_logger
+
+# Initialize logger
+logger = get_logger()
 
 from tools import restricted_web_search, url_scraper, reddit_search, safe_ai_call
 research_tools = [restricted_web_search, url_scraper]
@@ -63,10 +68,10 @@ async def keep_alive():
         try:
             msg = await channel.send("❤️")
             await msg.add_reaction('✅')
-            print(f"Heartbeat sent at {datetime.now().isoformat()}")
+            logger.info(f"Heartbeat sent at {datetime.now().isoformat()}", "HEARTBEAT")
             await asyncio.sleep(PING_INTERVAL)
         except Exception as e:
-            print(f"Heartbeat error: {str(e)}")
+            logger.error(f"Heartbeat error: {str(e)}", "HEARTBEAT")
             await asyncio.sleep(60)
 
 tools = [
@@ -158,8 +163,8 @@ analysis_llm = ChatGoogleGenerativeAI(
     max_output_tokens=4000
 )
 
-print(f"Type of analysis_prompt: {type(analysis_prompt)}")
-print(f"Type of analysis_tools: {type(analysis_tools)}")
+logger.debug(f"Analysis prompt type: {type(analysis_prompt)}", "INIT")
+logger.debug(f"Analysis tools type: {type(analysis_tools)}", "INIT")
 
 analysis_agent = create_tool_calling_agent(analysis_llm, analysis_tools, analysis_prompt)
 agent_executor = AgentExecutor(agent=analysis_agent, tools=analysis_tools, verbose=True)
@@ -210,11 +215,11 @@ def split_response(response: str) -> list[str]:
 
 @client.event
 async def on_ready():
-    print("Nothing to lose but our chains")
-    print("Available tools:")
+    logger.info("Bot started - Nothing to lose but our chains", "BOT")
+    logger.info("Available tools:", "BOT")
     for tool in tools:
-        print(f"- {tool.name}: {tool.description}")
-    print("-------------------------------")
+        logger.info(f"- {tool.name}: {tool.description}", "BOT")
+    logger.info("Bot initialization complete", "BOT")
     await web_server()
     client.loop.create_task(keep_alive())
 
@@ -232,39 +237,44 @@ async def on_message(message):
         
         if not query:
             return await ctx.send("Please provide a query after the mention")
+        
+        # Log query start
+        logger.query_start(query, str(message.author.id))
+        
         # Modified research phase in on_message()
         try:
             loading_msg = await ctx.send("⚙️ Processing query...")
             
             # Get optimized query
             research_response = await research_chain.ainvoke({"query": query})
-            print(f"19apr debug {research_response=}")
+            logger.debug(f"Optimized query: {research_response}", "RESEARCH")
             # Execute web search with optimized query
             try:
                 search_results = await restricted_web_search.ainvoke({"query": research_response})
                 if 'content' in search_results and search_results['content'].startswith("Search error:"):
                     search_results = await restricted_web_search.ainvoke({"query": query + " site:marxists.org"})
             except Exception as e:
-                print(f"Search error: {str(e)}")
+                logger.error(f"Search error: {str(e)}", "RESEARCH")
 
-            print(f"Search results: {search_results}")
+            logger.debug(f"Search results: {search_results}", "RESEARCH")
             
             if 'content' in search_results and search_results['content']:
-                print(f"19apr debug search_results['content']={search_results['content']}")
+                logger.debug(f"Processing search content: {search_results['content'][:200]}...", "RESEARCH")
                 
                 # Check if the content indicates an error
                 if search_results['content'].startswith("Search error:"):
+                    logger.warning("Search error detected in results", "RESEARCH")
                     await ctx.send("⚠️ Search error occurred. Please try again later.")
                     return
                 
                 try:
                     search_data = json.loads(search_results['content'])
                 except json.JSONDecodeError as e:
-                    print(f"JSON decode error: {str(e)}")
+                    logger.error(f"JSON decode error: {str(e)}", "RESEARCH")
                     await ctx.send("⚠️ Error processing search results: Invalid JSON format.")
                     return
             else:
-                print("No content found in search results.")
+                logger.warning("No content found in search results", "RESEARCH")
                 await ctx.send("⚠️ No search results returned.")
                 return
             
@@ -274,7 +284,7 @@ async def on_message(message):
                 "optimized_query": research_response,
                 "sources": []
             }
-            print(f"19apr debug {context=}")
+            logger.debug(f"Initialized context for query: {query}", "RESEARCH")
             # Process search results and scrape content
             for item in search_data[:3]:  # Limit to 3 sources for depth
                 if 'url' in item:
@@ -284,8 +294,9 @@ async def on_message(message):
                             "url": item["url"],
                             "content": scraped['content'][:2000]
                         })
+                        logger.debug(f"Successfully scraped: {item['url']}", "SCRAPING")
                     except Exception as e:
-                        print(f"Error scraping {item['url']}: {str(e)}")
+                        logger.error(f"Error scraping {item['url']}: {str(e)}", "SCRAPING")
                         continue
 
             # Add Reddit perspectives
@@ -327,11 +338,13 @@ async def on_message(message):
                 else:
                     await ctx.send(chunk)
         except ValidationError as e:
+            logger.error(f"Validation error: {str(e)}", "ANALYSIS")
             await ctx.send(f"🚨 Validation error: {str(e)}")
         except asyncio.TimeoutError:
+            logger.warning("Analysis timed out", "ANALYSIS")
             await ctx.send("⏱️ Analysis timed out - please try a more specific query")
         except Exception as e:
-            print(f"Error: {traceback.format_exc()}")
+            logger.exception(f"Analysis failed: {str(e)}", "ANALYSIS")
             await ctx.send(f"💥 Analysis failed: {str(e)}")
         
         return
@@ -346,6 +359,6 @@ async def web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Web server on port {port}")
+    logger.info(f"Web server started on port {port}", "SERVER")
 
 client.run(DISCORD_TOKEN)

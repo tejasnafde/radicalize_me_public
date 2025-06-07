@@ -5,13 +5,11 @@ from helpers.common_helpers import CommonHelpers
 import time
 import asyncio
 
-helpers = CommonHelpers()
-bot_handler = BotHandler()
-
 class HealthCheck(Resource):
     """Health check endpoint to verify service status"""
     def get(self):
         """Health check endpoint that returns system status"""
+        helpers = CommonHelpers()
         try:
             status = {
                 'status': 'healthy',
@@ -26,6 +24,8 @@ class HealthCheck(Resource):
 class DiscordAnalysis(Resource):
     """Main endpoint for handling Discord bot analysis requests"""
     def post(self):
+        helpers = CommonHelpers()
+        bot_handler = BotHandler()
         data = None  # Initialize data variable
         try:
             # Parse request arguments
@@ -61,13 +61,8 @@ class DiscordAnalysis(Resource):
             )
             loop.close()
             
-            # Format response for Discord
-            formatted_result = helpers.format_discord_response(
-                result.get('content', ''),
-                result.get('sources', [])
-            )
-            
-            return make_response(jsonify(helpers.create_response(200, formatted_result)), 200)
+            # The bot handler already returns a properly formatted response, just return it
+            return make_response(jsonify(result), 200)
         except Exception as e:
             helpers.report_to_discord(f"[ERROR] Analysis request failed: {str(e)}")
             # Only try to access data if it exists

@@ -2,12 +2,16 @@ import os
 from flask import Flask, request, jsonify
 from flask_restful import Api
 from helpers.common_helpers import CommonHelpers
+from helpers.logger import get_logger
 import ui.bot_ui as bot_ui
 import threading
 import time
 import requests
 import json
 from datetime import datetime
+
+# Initialize logger
+logger = get_logger()
 
 def create_app():
     app = Flask(__name__)
@@ -44,30 +48,30 @@ def start_keep_alive(app, helpers):
                 # Try internal URL first
                 response = requests.get(f"{app_url}/api/v1/health")
                 if response.status_code == 200:
-                    helpers.info_to_discord(f"Ping successful at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    logger.info(f"Ping successful at {time.strftime('%Y-%m-%d %H:%M:%S')}", "KEEP_ALIVE")
                 else:
                     # Try external URL as fallback
                     external_url = 'http://localhost:5001'
                     response = requests.get(f"{external_url}/api/v1/health")
                     if response.status_code == 200:
-                        helpers.info_to_discord(f"Ping successful (external) at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                        logger.info(f"Ping successful (external) at {time.strftime('%Y-%m-%d %H:%M:%S')}", "KEEP_ALIVE")
                     else:
-                        helpers.debug_to_discord(f"Ping failed with status {response.status_code}")
+                        logger.warning(f"Ping failed with status {response.status_code}", "KEEP_ALIVE")
             except Exception as e:
-                helpers.report_to_discord(f"Ping error: {str(e)}")
+                logger.error(f"Ping error: {str(e)}", "KEEP_ALIVE")
             time.sleep(ping_interval)
     
     # Start the ping thread
     thread = threading.Thread(target=ping_loop)
     thread.daemon = True
     thread.start()
-    helpers.info_to_discord("Keep-alive service started")
+    logger.info("Keep-alive service started", "KEEP_ALIVE")
 
 # Error Handlers
 def register_error_handlers(app):
     @app.errorhandler(404)
     def not_found(error):
-        print(f"[ERROR] 404 Not Found: {request.url}")
+        logger.error(f"404 Not Found: {request.url}")
         return jsonify({
             'error': {
                 'status': 404,
@@ -88,7 +92,7 @@ def register_error_handlers(app):
         }
         
         # Log the error
-        print(f"[ERROR] 500 Internal Error: {json.dumps(error_details, indent=2)}")
+        logger.error(f"500 Internal Error: {json.dumps(error_details, indent=2)}")
         
         # Report to Discord
         helpers = CommonHelpers()
@@ -104,7 +108,7 @@ def register_error_handlers(app):
 
     @app.errorhandler(400)
     def bad_request(error):
-        print(f"[ERROR] 400 Bad Request: {request.url} - {str(error)}")
+        logger.error(f"400 Bad Request: {request.url} - {str(error)}")
         return jsonify({
             'error': {
                 'status': 400,
@@ -116,7 +120,7 @@ def register_error_handlers(app):
 
     @app.errorhandler(429)
     def too_many_requests(error):
-        print(f"[ERROR] 429 Rate Limit Exceeded: {request.url}")
+        logger.error(f"429 Rate Limit Exceeded: {request.url}")
         return jsonify({
             'error': {
                 'status': 429,

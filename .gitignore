@@ -9,3 +9,8 @@ test/
 .DS_Store
 /main.py
 /tools.py
+logs/
+*.log
+
+# Test scripts (consolidated in tests.py)
+test_*.py

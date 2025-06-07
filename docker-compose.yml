@@ -25,6 +25,7 @@ services:
       - PYTHONUNBUFFERED=1  # Ensure Python output is not buffered
     volumes:
       - .:/app
+      - ./logs:/app/logs  # Mount logs directory for persistence
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/api/v1/health"]
       interval: 30s

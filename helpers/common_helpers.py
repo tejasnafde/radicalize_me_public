@@ -10,13 +10,14 @@ from functools import lru_cache
 import logging
 import sys
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    stream=sys.stdout  # Ensure logs go to stdout for Docker
-)
-logger = logging.getLogger(__name__)
+# Import our custom logger first
+from .logger import get_logger
+
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+
+# Use our custom logger
+logger = get_logger(__name__)
 
 class CommonHelpers:
     def __init__(self):
@@ -33,8 +34,8 @@ class CommonHelpers:
             'reddit_search': time.time()
         }
         self.rate_limit_seconds = {
-            'web_search': 2,
-            'reddit_search': 5
+            'web_search': 10,
+            'reddit_search': 10
         }
         self.reddit_client = self.get_reddit_client()
 
@@ -54,6 +55,7 @@ class CommonHelpers:
         ]
         missing = [var for var in required_vars if not os.getenv(var)]
         if missing:
+            logger.error(f"Missing required environment variables: {', '.join(missing)}", "ENV_VARS")
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
     def create_response(self, status_code: int, message: Any) -> Dict[str, Any]:
@@ -66,12 +68,18 @@ class CommonHelpers:
                     "status_code": status_code,
                     "message": message
                 }
+            # If message is a dict without status, add status and preserve all fields
+            return {
+                "status": "success" if status_code < 400 else "error",
+                "status_code": status_code,
+                "message": message  # Preserve all fields in the message
+            }
         
         # Otherwise create a new response structure
         return {
             "status": "success" if status_code < 400 else "error",
             "status_code": status_code,
-            "message": message
+            "message": message if isinstance(message, dict) else {"content": str(message)}
         }
 
     def handle_exceptions(self, error: Exception, user_id: Optional[str] = None) -> None:
@@ -79,6 +87,7 @@ class CommonHelpers:
         error_message = f"Error: {str(error)}\nTime: {datetime.now()}"
         if user_id:
             error_message += f"\nUser ID: {user_id}"
+        
         self.report_to_discord(error_message)
 
     def report_to_discord(self, message: str, error_type: str = "ERROR") -> None:
@@ -155,21 +164,13 @@ class CommonHelpers:
             logger.error(f"[ERROR] Failed to send error report to Discord: {str(e)}")
             logger.error(f"[ERROR] Message that failed to send: {message}")
 
-    def debug_to_discord(self, message: str) -> None:
-        """Send debug messages to Discord with additional context"""
-        debug_info = {
-            "message": message,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        self.report_to_discord(json.dumps(debug_info), "DEBUG")
-
     def info_to_discord(self, message: str) -> None:
         """Send info messages to Discord"""
         self.report_to_discord(message, "INFO")
 
-    def rotate_api_key(self) -> str:
-        """Rotate between different API keys to avoid rate limits"""
-        return self.api_keys[int(time.time()) % len(self.api_keys)]
+    # def rotate_api_key(self) -> str:
+    #     """Rotate between different API keys to avoid rate limits"""
+    #     return self.api_keys[int(time.time()) % len(self.api_keys)]
 
     def validate_query(self, query: str) -> bool:
         """Validate the user's query"""
@@ -179,13 +180,6 @@ class CommonHelpers:
             return False
         return True
 
-    def format_discord_response(self, content: str, sources: list) -> Dict:
-        """Format the response for Discord"""
-        return {
-            "content": content,
-            "sources": sources,
-            "timestamp": datetime.now().isoformat()
-        }
 
     def log_request(self, request_data: Dict) -> None:
         """Log incoming requests"""
@@ -195,7 +189,7 @@ class CommonHelpers:
             "user_id": request_data.get("user_id"),
             "channel_id": request_data.get("channel_id")
         }
-        print(f"[INFO] Request logged: {json.dumps(log_entry)}")
+        logger.info(f"Request logged: {json.dumps(log_entry)}")
 
     @lru_cache(maxsize=1)
     def get_reddit_client(self):
@@ -223,10 +217,10 @@ class CommonHelpers:
         try:
             # Use the correct port (5001) for external access
             health_url = "http://localhost:5001/api/v1/health"
-            self.debug_to_discord(f"Pinging health endpoint: {health_url}")
+            logger.debug(f"Pinging health endpoint: {health_url}")
             response = requests.get(health_url, timeout=5)
             response.raise_for_status()
-            self.debug_to_discord("Health check successful")
+            logger.debug("Health check successful")
             return True
         except Exception as e:
             self.report_to_discord(f"Health check failed: {str(e)}")
@@ -235,7 +229,7 @@ class CommonHelpers:
     async def handle_api_error(self, error: Exception, retry_count: int = 0, max_retries: int = 3) -> bool:
         """Handle API errors with retry logic"""
         if retry_count >= max_retries:
-            self.debug_to_discord(f"Max retries ({max_retries}) exceeded for API call")
+            logger.warning(f"Max retries ({max_retries}) exceeded for API call")
             return False
 
         error_str = str(error).lower()
@@ -250,21 +244,21 @@ class CommonHelpers:
             except:
                 pass
             
-            self.debug_to_discord(f"Rate limit hit, waiting {retry_delay} seconds before retry {retry_count + 1}/{max_retries}")
+            logger.info(f"Rate limit hit, waiting {retry_delay} seconds before retry {retry_count + 1}/{max_retries}")
             await asyncio.sleep(retry_delay)
             return True
             
         # Check if it's a parsing or data structure error
         if any(x in error_str for x in ["none", "subscriptable", "key", "index", "attribute"]):
-            self.debug_to_discord(f"Data structure error: {str(error)}")
+            logger.error(f"Data structure error: {str(error)}")
             return False
             
         # Check if it's a network error
         if any(x in error_str for x in ["connection", "timeout", "network"]):
-            self.debug_to_discord(f"Network error: {str(error)}")
+            logger.warning(f"Network error: {str(error)}")
             await asyncio.sleep(2 ** retry_count)  # Exponential backoff
             return True
             
         # For other errors, log and don't retry
-        self.debug_to_discord(f"Unhandled error type: {str(error)}")
+        logger.error(f"Unhandled error type: {str(error)}")
         return False

@@ -1,23 +1,24 @@
 import os
 import discord
+import asyncio
 from discord.ext import commands
-import requests
-import json
 from helpers.common_helpers import CommonHelpers
-import aiohttp
-import logging
-import sys
+from helpers.queue_manager import QueueManager
+from helpers.discord_notifier import DiscordNotifier
+from handlers.bot_handler import BotHandler
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    stream=sys.stdout  # Ensure logs go to stdout for Docker
-)
-logger = logging.getLogger(__name__)
 
-# Initialize helpers
+# Import unified logger
+from helpers.logger import get_logger
+
+# Initialize logger and helpers
+logger = get_logger()
 helpers = CommonHelpers()
+
+# Initialize queue system
+queue_manager = QueueManager(max_queue_size=20)  # Allow up to 20 queued items
+bot_handler = BotHandler()
+discord_notifier = None  # Will be initialized after bot is ready
 
 # Bot configuration
 intents = discord.Intents.default()
@@ -29,8 +30,17 @@ API_URL = os.getenv('API_URL', 'http://app:5000/api/v1/analyze')  # Use service 
 
 @client.event
 async def on_ready():
-    logger.info(f"Bot is ready! Logged in as {client.user}")
+    global discord_notifier
+    logger.info(f"Bot is ready! Logged in as {client.user}", "DISCORD_BOT")
+    
+    # Initialize Discord notifier now that bot is ready
+    discord_notifier = DiscordNotifier(client)
+    
+    # Start the queue processor
+    queue_manager.start_processor(bot_handler, discord_notifier)
+    
     helpers.info_to_discord(f"Bot is ready! Logged in as {client.user}")
+    logger.info("Queue system initialized and started", "DISCORD_BOT")
 
 @client.event
 async def on_message(message):
@@ -41,90 +51,84 @@ async def on_message(message):
         try:
             # Extract query from message
             query = message.content.replace(f'<@{client.user.id}>', '').strip()
-            logger.info(f"Received query: {query}")
+            user_id = str(message.author.id)
+            channel_id = str(message.channel.id)
             
-            # Send initial response
-            await message.channel.send("🔍 Analyzing your query... This may take a few minutes.")
+            logger.query_start(query, user_id)
             
-            # Make API request
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    API_URL,
-                    json={"query": query, "user_id": str(message.author.id)}
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        
-                        # Log the raw response data for debugging
-                        logger.debug(f"Raw response data: {data}")
-                        helpers.debug_to_discord(f"Raw response data: {data}")
-                        
-                        # Extract message data with detailed logging
-                        message_data = data.get('message', {})
-                        logger.debug(f"Extracted message data: {message_data}")
-                        helpers.debug_to_discord(f"Extracted message data: {message_data}")
-                        
-                        # Validate message data structure
-                        if not message_data:
-                            error_msg = "Empty message data received from API"
-                            logger.error(error_msg)
-                            helpers.debug_to_discord(error_msg)
-                            raise ValueError(error_msg)
-                        
-                        # Check for required fields with detailed logging
-                        required_fields = ['topic', 'summary']
-                        missing_fields = [field for field in required_fields if field not in message_data]
-                        
-                        if missing_fields:
-                            error_msg = (
-                                f"Missing required fields in API response:\n"
-                                f"- Missing fields: {missing_fields}\n"
-                                f"- Available fields: {list(message_data.keys())}\n"
-                                f"- Raw message data: {message_data}"
-                            )
-                            logger.error(error_msg)
-                            helpers.debug_to_discord(error_msg)
-                            raise ValueError(error_msg)
-                        
-                        # Format response with detailed logging
-                        try:
-                            response_text = f"**{message_data['topic']}**\n\n{message_data['summary']}\n\n"
-                            logger.debug(f"Base response formatted: {response_text[:100]}...")
-                            
-                            # Add PDF links section if available
-                            if message_data.get('pdf_links'):
-                                logger.debug(f"Processing PDF links: {message_data['pdf_links']}")
-                                response_text += "\n**📚 Read More**\n"
-                                for pdf in message_data['pdf_links']:
-                                    if not isinstance(pdf, dict) or 'title' not in pdf or 'url' not in pdf:
-                                        logger.warning(f"Invalid PDF link format: {pdf}")
-                                        continue
-                                    response_text += f"• [{pdf['title']}]({pdf['url']})\n"
-                            
-                            # Log the final formatted response
-                            logger.info(f"Final formatted response: {response_text}")
-                            helpers.debug_to_discord(f"Final formatted response: {response_text}")
-                            
-                            # Send the response
-                            await message.channel.send(response_text)
-                            
-                        except Exception as e:
-                            error_msg = f"Error formatting response: {str(e)}\nMessage data: {message_data}"
-                            logger.error(error_msg)
-                            helpers.debug_to_discord(error_msg)
-                            raise ValueError(error_msg)
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"API error response: {error_text}")
-                        helpers.debug_to_discord(f"API error response: {error_text}")
-                        await message.channel.send(f"❌ Error: {error_text}")
-                        
+            # Validate query
+            if not query or len(query.strip()) == 0:
+                await message.channel.send("❌ Please provide a query after mentioning me!")
+                return
+            
+            if len(query) > 500:
+                await message.channel.send("❌ Query too long! Please keep it under 500 characters.")
+                return
+            
+            try:
+                # Add to queue
+                queue_item = await queue_manager.add_to_queue(user_id, channel_id, query)
+                
+                # Send queue position notification (only if position > 0)
+                await discord_notifier.notify_queue_position(queue_item)
+                
+                # For immediate processing (position 0), send a simple acknowledgment
+                if queue_item.position == 0:
+                    await message.channel.send("🔍 Processing your query...")
+                    
+            except asyncio.QueueFull:
+                await message.channel.send(
+                    "❌ The processing queue is currently full. Please try again in a few minutes!"
+                )
+                logger.warning(f"Queue full, rejected query from user {user_id}", "DISCORD_BOT")
+                
         except Exception as e:
-            logger.error(f"Error processing message: {str(e)}", exc_info=True)
+            logger.exception(f"Error processing message: {str(e)}", "DISCORD_BOT")
             helpers.report_to_discord(f"Error processing message: {str(e)}")
             await message.channel.send("❌ An error occurred while processing your request.")
+
+# Add queue management commands
+@client.command(name='queue')
+async def queue_status(ctx):
+    """Show current queue status"""
+    try:
+        status = await queue_manager.get_queue_status()
+        await discord_notifier.send_queue_status(str(ctx.author.id), status)
+        await ctx.send("📊 Queue status sent to your DMs!")
+    except Exception as e:
+        logger.error(f"Error showing queue status: {str(e)}", "DISCORD_BOT")
+        await ctx.send("❌ Error retrieving queue status.")
+
+@client.command(name='mystatus')
+async def my_status(ctx):
+    """Show user's current position in queue"""
+    try:
+        user_id = str(ctx.author.id)
+        position = await queue_manager.get_user_queue_position(user_id)
+        
+        if position:
+            wait_time = discord_notifier._estimate_wait_time(position)
+            await ctx.send(f"📍 You're at position **#{position}** in the queue (~{wait_time} wait)")
+        else:
+            await ctx.send("✅ You don't have any queries in the current queue.")
+            
+    except Exception as e:
+        logger.error(f"Error showing user status: {str(e)}", "DISCORD_BOT")
+        await ctx.send("❌ Error retrieving your status.")
+
+# Graceful shutdown handler
+async def shutdown():
+    """Gracefully shutdown the bot and queue system"""
+    logger.info("Shutting down bot and queue system...", "DISCORD_BOT")
+    await queue_manager.shutdown()
+    await client.close()
 
 # Run the bot
 if __name__ == "__main__":
     logger.info("Starting Discord bot...")
-    client.run(os.getenv('DISCORD_TOKEN'))
+    try:
+        client.run(os.getenv('DISCORD_TOKEN'))
+    except KeyboardInterrupt:
+        logger.info("Received shutdown signal", "DISCORD_BOT")
+        import asyncio
+        asyncio.run(shutdown())
