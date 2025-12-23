@@ -1,64 +1,174 @@
-# radicalize_me_public
-discord bot
+# Radicalize Me - Marxist Research Discord Bot
 
-## Unified Logging System
+A Discord bot that provides Marxist analysis and research on user queries using multiple LLM providers, web scraping, and Reddit integration.
 
-The application uses a unified logging system that intelligently routes messages based on severity. All logging has been migrated from print statements and the old logger system to this centralized approach.
+## Features
 
-- **DEBUG/INFO/WARNING**: Only written to log files (silent notifications)
-- **ERROR/CRITICAL**: Written to both log files AND sent to Discord (active alerts)
+- 🔍 **Multi-source Research** - Searches Marxist websites, Reddit, and academic sources
+- 📊 **Queue System** - Handles multiple users with position tracking and wait time estimates
+- 🤖 **LLM-Powered Analysis** - Uses Google Gemini, Groq, and HuggingFace with automatic fallback
+- 📝 **Comprehensive Logging** - Unified logging system with Discord error alerts
+- 🎯 **Smart Citations** - Provides sources and references for all analysis
 
-### Log Files
-- `logs/app.log` - All application logs with rotation (20MB max size, 10 backups)
-- `logs/errors.log` - Only errors and critical issues (10MB max size, 5 backups)
+## Quick Start
 
-### Context-Based Logging
-All log messages include context tags for easy filtering:
-- `[PIPELINE]` - Research pipeline operations
-- `[SEARCH]` - Search API operations 
-- `[LLM]` - Language model interactions
-- `[SCRAPING]` - Web scraping operations
-- `[DISCORD_BOT]` - Discord bot events
-- `[RUNNER]` - Process management
-- `[API]` - API calls and responses
-
-### Enhanced Log Viewer
-Use the enhanced `view_logs.py` script with powerful filtering:
+### 1. Installation
 
 ```bash
-# View all recent logs
-python view_logs.py
-
-# Follow logs in real-time
-python view_logs.py --follow
-
-# Filter by context (show only pipeline operations)
-python view_logs.py --context PIPELINE --follow
-
-# Filter by log level (show only errors)
-python view_logs.py --level ERROR
-
-# Show only error log file
-python view_logs.py --errors-only
-
-# Filter by query content
-python view_logs.py --query "stalin" --follow
-
-# Combine filters (pipeline errors only)
-python view_logs.py --context PIPELINE --level ERROR
-
-# Search for specific text
-python view_logs.py --filter "optimization" --tail 100
+git clone https://github.com/tejasnafde/radicalize_me_public.git
+cd radicalize_me_public
+pip install -r requirements.txt
 ```
 
-### Available Commands
-- `--tail N`: Show last N lines (default: 50)
-- `--follow`: Follow log file in real-time
-- `--context CTX`: Filter by context (PIPELINE, SEARCH, etc.)
-- `--level LVL`: Filter by level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-- `--filter TEXT`: Show lines containing specific text
-- `--query QUERY`: Show logs related to a specific query
-- `--errors-only`: Show only the error log file
+### 2. Configuration
 
-### Discord Notifications
-Only errors and critical failures are sent to Discord, keeping your notification channel clean while maintaining full visibility into issues that need immediate attention.
+```bash
+cp .env.example .env
+# Edit .env with your API keys
+```
+
+**Required API Keys:**
+- `GOOGLE_API_KEY` - Google Gemini (primary LLM)
+- `DISCORD_TOKEN` - Discord bot token
+- `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` - Reddit API credentials
+
+**Optional API Keys:**
+- `GROQ_API_KEY`, `HUGGINGFACE_API_KEY` - Fallback LLMs
+- `GOOGLE_CSE_ID`, `SERPAPI_API_KEY` - Search API fallbacks
+
+### 3. Run
+
+**Docker (Recommended):**
+```bash
+docker-compose up -d
+```
+
+**Local:**
+```bash
+python run.py
+```
+
+## Usage
+
+### Discord Commands
+
+- `@Bot <query>` - Ask a question and get Marxist analysis
+- `!queue` - View current queue status (sent to DMs)
+- `!mystatus` - Check your position in queue
+
+### REST API
+
+```bash
+# Health check
+curl http://localhost:5000/api/v1/health
+
+# Analysis request
+curl -X POST http://localhost:5000/api/v1/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is democratic centralism?", "user_id": "123"}'
+```
+
+## Documentation
+
+- [Queue System](QUEUE_SYSTEM.md) - Detailed queue implementation
+- [Logging System](#logging-system) - Log viewer and filtering
+
+## Logging System
+
+The application uses a unified logging system with intelligent routing:
+
+- **DEBUG/INFO/WARNING** - Only written to log files
+- **ERROR/CRITICAL** - Written to log files AND sent to Discord
+
+### Log Files
+
+- `logs/app.log` - All logs (20MB rotation, 10 backups)
+- `logs/errors.log` - Errors only (10MB rotation, 5 backups)
+
+### Log Viewer
+
+```bash
+# View recent logs
+python view_logs.py
+
+# Follow in real-time
+python view_logs.py --follow
+
+# Filter by context
+python view_logs.py --context PIPELINE --follow
+
+# Filter by level
+python view_logs.py --level ERROR
+
+# Show only errors
+python view_logs.py --errors-only
+```
+
+## Architecture
+
+```
+Discord Bot → Queue Manager → Bot Handler → Research Pipeline
+                                              ↓
+                            Web Search + Reddit + LLM Analysis
+                                              ↓
+                            Discord Notifier → User Response
+```
+
+**Key Components:**
+- `discord_bot.py` - Discord bot entry point
+- `helpers/queue_manager.py` - Async queue with persistence
+- `helpers/research_pipeline.py` - Core research & LLM orchestration
+- `helpers/reddit_helper.py` - Reddit integration
+- `handlers/bot_handler.py` - Request processing
+
+## Development
+
+### Project Structure
+
+```
+radicalize_me_public/
+├── discord_bot.py          # Discord bot entry point
+├── flask_app.py            # Flask API entry point
+├── run.py                  # Process runner (both services)
+├── handlers/               # Request handlers
+├── helpers/                # Core logic (pipeline, queue, etc.)
+├── ui/                     # REST API endpoints
+├── tests/                  # Test files
+├── logs/                   # Runtime logs
+└── archive/                # Legacy code (reference only)
+```
+
+### Running Tests
+
+```bash
+python test_queue.py
+python test_reddit_integration.py
+python tests.py
+```
+
+## Deployment
+
+### Docker
+
+```bash
+# Build and start
+docker-compose up -d
+
+# View logs
+docker-compose logs -f app
+
+# Stop
+docker-compose down
+```
+
+### Environment Variables
+
+See `.env.example` for all configuration options.
+
+## Contributing
+
+This is a personal project, but suggestions and feedback are welcome via issues.
+
+## License
+
+MIT License - See LICENSE file for details
