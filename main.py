@@ -4,6 +4,7 @@ load_dotenv()
 import discord
 import re
 import os
+import json
 import asyncio
 from aiohttp import web
 import traceback
@@ -12,20 +13,38 @@ from datetime import datetime
 from pydantic import BaseModel, Field, field_validator, ValidationError
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.output_parsers import PydanticOutputParser, StrOutputParser
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from google.generativeai.types.safety_types import HarmCategory, HarmBlockThreshold
 try:
     from typing import Annotated
 except ImportError:
     from typing_extensions import Annotated
-from tools import (
-    marxists_org_search,
-    marxist_com_search,
-    bannedthought_search,
-    url_scraper,
-    reddit_search
+
+# Import the unified logger
+from helpers.logger import get_logger
+
+# Initialize logger
+logger = get_logger()
+
+from tools import restricted_web_search, url_scraper, reddit_search, safe_ai_call
+research_tools = [restricted_web_search, url_scraper]
+analysis_tools = [url_scraper, reddit_search]
+
+research_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a research assistant. Optimize search queries for Marxist research.
+Output ONLY the optimized search query - maximum 100 characters. No explanations."""),
+    ("human", "{query}")
+])
+
+research_llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
+    temperature=0.2,
+    safety_settings={category: HarmBlockThreshold.BLOCK_NONE 
+                    for category in HarmCategory}
 )
+
+research_chain = research_prompt | research_llm | StrOutputParser()
 
 KEEP_ALIVE_CHANNEL_ID = 881890878308896778
 BOT_ID = None
@@ -49,16 +68,13 @@ async def keep_alive():
         try:
             msg = await channel.send("❤️")
             await msg.add_reaction('✅')
-            print(f"Heartbeat sent at {datetime.now().isoformat()}")
+            logger.info(f"Heartbeat sent at {datetime.now().isoformat()}", "HEARTBEAT")
             await asyncio.sleep(PING_INTERVAL)
         except Exception as e:
-            print(f"Heartbeat error: {str(e)}")
+            logger.error(f"Heartbeat error: {str(e)}", "HEARTBEAT")
             await asyncio.sleep(60)
 
 tools = [
-    marxists_org_search,
-    marxist_com_search,
-    bannedthought_search,
     url_scraper,
     reddit_search
 ]
@@ -87,62 +103,89 @@ llm = ChatGoogleGenerativeAI(
 )
 parser = PydanticOutputParser(pydantic_object=Response)
 
-system_prompt = """
-You are a dialectical materialist analysis engine. Follow this protocol:
+# system_prompt = """
+# You are a dialectical materialist analysis engine. Follow this protocol:
 
-1. TOOL MANDATE:
-   - REQUIRED: Use EXACTLY 3 tools minimum
-   - Required Tools for ALL Queries:
-     a) marxists_org_search (historical context)
-     b) marxist_com_search OR bannedthought_search (modern analysis)
-     c) reddit_search (proletarian perspective)
-   - url_scraper MANDATORY when citing specific URLs
+# 1. TOOL MANDATE:
+#    - REQUIRED: Use EXACTLY 3 tools minimum
+#    - Required Tools for ALL Queries:
+#      a) marxists_org_search (historical context)
+#      b) marxist_com_search OR bannedthought_search (modern analysis)
+#      c) reddit_search (proletarian perspective)
+#    - url_scraper MANDATORY when citing specific URLs
 
-2. EXECUTION FLOW:
-   a) ALWAYS start with marxists_org_search
-   b) THEN modern analysis tool
-   c) THEN reddit_search
-   d) FINALLY url_scraper if sources cited
+# 2. EXECUTION FLOW:
+#    a) ALWAYS start with marxists_org_search
+#    b) THEN modern analysis tool
+#    c) THEN reddit_search
+#    d) FINALLY url_scraper if sources cited
 
-3. OUTPUT REQUIREMENTS:
-   - Each paragraph MUST contain [Source:ToolName] citations
-   - Tools used MUST match citations
-   - ABSOLUTELY NO unsourced claims
-   - Output must be as exhaustive as possible, keeping the length around 500-1000 words, but DO NOT lengthen the text if you cannot find sufficient relevant information.
+# 3. OUTPUT REQUIREMENTS:
+#    - Each paragraph MUST contain [Source:ToolName] citations
+#    - Tools used MUST match citations
+#    - ABSOLUTELY NO unsourced claims
+#    - Output must be as exhaustive as possible, keeping the length around 500-1000 words, but DO NOT lengthen the text if you cannot find sufficient relevant information.
 
-4. FAILURE MODES:
-   - If ANY tool returns no results: STATE WHICH TOOL FAILED
-   - If <3 tools used: OUTPUT INVALID - RETRY ANALYSIS
-   - If post-2010 content: REQUIRE reddit_search + url_scraper
+# 4. FAILURE MODES:
+#    - If ANY tool returns no results: STATE WHICH TOOL FAILED
+#    - If <3 tools used: OUTPUT INVALID - RETRY ANALYSIS
+#    - If post-2010 content: REQUIRE reddit_search + url_scraper
 
-{format_instructions}
+# {format_instructions}
 
-EXAMPLE WORKFLOW:
-1. "US labor strikes" => 
-   - marxists_org_search (Marx on labor)
-   - marxist_com_search (modern strike analysis)
-   - reddit_search (worker experiences)
-   - url_scraper (verify marxist.com article)
-"""
+# EXAMPLE WORKFLOW:
+# 1. "US labor strikes" => 
+#    - marxists_org_search (Marx on labor)
+#    - marxist_com_search (modern strike analysis)
+#    - reddit_search (worker experiences)
+#    - url_scraper (verify marxist.com article)
+# """
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", system_prompt),
-    ("human", "{query}"),
-    ("placeholder", "{agent_scratchpad}")
-]).partial(format_instructions=parser.get_format_instructions())
+analysis_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a Marxist analyst. Use provided research context and tools.
+        
+    RESEARCH CONTEXT:
+    {context}
 
-agent = create_tool_calling_agent(
-    llm=llm,
-    prompt=prompt,
-    tools=tools
+    ANALYSIS PROTOCOL:
+    1. Cross-reference sources
+    2. Apply historical materialism
+    3. Cite sources with [Source#] notation
+    4. Use the agent scratchpad for intermediate steps: {agent_scratchpad}"""),
+    ("human", "{query}")
+])
+
+analysis_llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-pro",
+    temperature=0.3,
+    safety_settings={category: HarmBlockThreshold.BLOCK_NONE 
+                    for category in HarmCategory},
+    max_output_tokens=4000
 )
 
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    verbose=True,
-    return_intermediate_steps=True
-)
+logger.debug(f"Analysis prompt type: {type(analysis_prompt)}", "INIT")
+logger.debug(f"Analysis tools type: {type(analysis_tools)}", "INIT")
+
+analysis_agent = create_tool_calling_agent(analysis_llm, analysis_tools, analysis_prompt)
+agent_executor = AgentExecutor(agent=analysis_agent, tools=analysis_tools, verbose=True)
+# prompt = ChatPromptTemplate.from_messages([
+#     ("system", system_prompt),
+#     ("human", "{query}"),
+#     ("placeholder", "{agent_scratchpad}")
+# ]).partial(format_instructions=parser.get_format_instructions())
+
+# agent = create_tool_calling_agent(
+#     llm=llm,
+#     prompt=prompt,
+#     tools=tools
+# )
+
+# agent_executor = AgentExecutor(
+#     agent=agent,
+#     tools=tools,
+#     verbose=True,
+#     return_intermediate_steps=True
+# )
 
 def split_response(response: str) -> list[str]:
     chunks = []
@@ -172,11 +215,11 @@ def split_response(response: str) -> list[str]:
 
 @client.event
 async def on_ready():
-    print("Nothing to lose but our chains")
-    print("Available tools:")
+    logger.info("Bot started - Nothing to lose but our chains", "BOT")
+    logger.info("Available tools:", "BOT")
     for tool in tools:
-        print(f"- {tool.name}: {tool.description}")
-    print("-------------------------------")
+        logger.info(f"- {tool.name}: {tool.description}", "BOT")
+    logger.info("Bot initialization complete", "BOT")
     await web_server()
     client.loop.create_task(keep_alive())
 
@@ -188,72 +231,120 @@ async def on_message(message):
             return
     if message.author.bot:
         return
-
     if client.user in message.mentions:
         ctx = await client.get_context(message)
         query = re.sub(rf'<@!?{client.user.id}>', '', message.content).strip()
         
         if not query:
             return await ctx.send("Please provide a query after the mention")
-
+        
+        # Log query start
+        logger.query_start(query, str(message.author.id))
+        
+        # Modified research phase in on_message()
         try:
-            loading_msg = await ctx.send("⚙️ Analyzing class contradictions...")
+            loading_msg = await ctx.send("⚙️ Processing query...")
             
-            async with ctx.typing():
-                result = await agent_executor.ainvoke({"query": query})
+            # Get optimized query
+            research_response = await research_chain.ainvoke({"query": query})
+            logger.debug(f"Optimized query: {research_response}", "RESEARCH")
+            # Execute web search with optimized query
+            try:
+                search_results = await restricted_web_search.ainvoke({"query": research_response})
+                if 'content' in search_results and search_results['content'].startswith("Search error:"):
+                    search_results = await restricted_web_search.ainvoke({"query": query + " site:marxists.org"})
+            except Exception as e:
+                logger.error(f"Search error: {str(e)}", "RESEARCH")
 
-                print("\n" + "="*40 + " INITIAL ANALYSIS STEPS " + "="*40)
-                if 'intermediate_steps' in result:
-                    for i, step in enumerate(result['intermediate_steps'], 1):
-                        tool_name = step[0].tool
-                        tool_input = step[0].tool_input
-                        tool_output = step[1][:500] + "..." if isinstance(step[1], str) and len(step[1]) > 500 else step[1]
-                        print(f"\nSTEP {i}: {tool_name.upper()}")
-                        print(f"INPUT:\n{tool_input}")
-                        print(f"OUTPUT:\n{tool_output}")
-                        print("-"*80)
-                else:
-                    print("No intermediate steps recorded in initial analysis")
+            logger.debug(f"Search results: {search_results}", "RESEARCH")
+            
+            if 'content' in search_results and search_results['content']:
+                logger.debug(f"Processing search content: {search_results['content'][:200]}...", "RESEARCH")
                 
-                if 'intermediate_steps' not in result or len(result['intermediate_steps']) < 3:
-                    print("\n" + "!"*40 + " INITIAL ANALYSIS INSUFFICIENT - RETRYING " + "!"*40)
-                    result = await agent_executor.ainvoke({
-                        "query": f"REANALYZE USING 3+ TOOLS - Original query: {query}"
-                    })
-
-                print("\n" + "="*40 + " RETRY ANALYSIS STEPS " + "="*40)
-                if 'intermediate_steps' in result:
-                    for i, step in enumerate(result['intermediate_steps'], 1):
-                        tool_name = step[0].tool
-                        tool_input = step[0].tool_input
-                        tool_output = step[1][:500] + "..." if isinstance(step[1], str) and len(step[1]) > 500 else step[1]
-                        print(f"\nRETRY STEP {i}: {tool_name.upper()}")
-                        print(f"INPUT:\n{tool_input}")
-                        print(f"OUTPUT:\n{tool_output}")
-                        print("-"*80)
-                else:
-                    print("No intermediate steps recorded in retry analysis")
-                    
-                raw_output = result['output']
-                parsed = parser.parse(raw_output)
-
-                print("\n" + "="*40 + " FINAL VALIDATION " + "="*40)
-                print(f"Tools Used: {parsed.tools_used}")
-                print(f"Output Length: {len(raw_output)} characters")
-                print(f"Validation Successful: {parsed}")
+                # Check if the content indicates an error
+                if search_results['content'].startswith("Search error:"):
+                    logger.warning("Search error detected in results", "RESEARCH")
+                    await ctx.send("⚠️ Search error occurred. Please try again later.")
+                    return
                 
-                response = f"**{parsed.topic}**\n\n{parsed.summary}"
-                chunks = split_response(response)
+                try:
+                    search_data = json.loads(search_results['content'])
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON decode error: {str(e)}", "RESEARCH")
+                    await ctx.send("⚠️ Error processing search results: Invalid JSON format.")
+                    return
+            else:
+                logger.warning("No content found in search results", "RESEARCH")
+                await ctx.send("⚠️ No search results returned.")
+                return
+            
+            # Scrape and process results
+            context = {
+                "original_query": query,
+                "optimized_query": research_response,
+                "sources": []
+            }
+            logger.debug(f"Initialized context for query: {query}", "RESEARCH")
+            # Process search results and scrape content
+            for item in search_data[:3]:  # Limit to 3 sources for depth
+                if 'url' in item:
+                    try:
+                        scraped = await url_scraper.ainvoke({"url": item["url"]})
+                        context["sources"].append({
+                            "url": item["url"],
+                            "content": scraped['content'][:2000]
+                        })
+                        logger.debug(f"Successfully scraped: {item['url']}", "SCRAPING")
+                    except Exception as e:
+                        logger.error(f"Error scraping {item['url']}: {str(e)}", "SCRAPING")
+                        continue
 
+            # Add Reddit perspectives
+            reddit_results = await reddit_search.ainvoke({"query": query})
+            if reddit_results['content'] != "No relevant Reddit discussions found":
+                context["sources"].append({
+                    "type": "reddit",
+                    "content": reddit_results['content'],
+                    "urls": reddit_results['sources']
+                })
+            # Step 4: Run analysis with the formatted context
+            await loading_msg.edit(content="📊 Performing dialectical analysis...")
+            
+            analysis_response = await agent_executor.ainvoke({
+                "query": query,
+                "context": json.dumps(context),
+                "agent_scratchpad": [],
+                "format_instructions": parser.get_format_instructions()  # Add format instructions
+            })
+
+            try:
+                validated = parser.parse(analysis_response['output'])
+                output = f"## {validated.topic}\n\n{validated.summary}"
+                output += f"\n\n*Tools used: {', '.join(validated.tools_used)}*"
+            except ValidationError:
+                output = analysis_response['output']
+            
+            # Step 5: Send the response in chunks
             await loading_msg.delete()
-            for chunk in chunks:
-                if chunk.strip():
+            chunks = split_response(output)
+            
+            if not chunks:
+                await ctx.send("⚠️ No analysis could be generated")
+                return
+                
+            for i, chunk in enumerate(chunks):
+                if i == 0:
+                    await ctx.send(f"**Analysis of '{query[:50]}...'**\n\n{chunk}")
+                else:
                     await ctx.send(chunk)
-
         except ValidationError as e:
+            logger.error(f"Validation error: {str(e)}", "ANALYSIS")
             await ctx.send(f"🚨 Validation error: {str(e)}")
+        except asyncio.TimeoutError:
+            logger.warning("Analysis timed out", "ANALYSIS")
+            await ctx.send("⏱️ Analysis timed out - please try a more specific query")
         except Exception as e:
-            print(f"Error: {traceback.format_exc()}")
+            logger.exception(f"Analysis failed: {str(e)}", "ANALYSIS")
             await ctx.send(f"💥 Analysis failed: {str(e)}")
         
         return
@@ -268,6 +359,6 @@ async def web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Web server on port {port}")
+    logger.info(f"Web server started on port {port}", "SERVER")
 
 client.run(DISCORD_TOKEN)

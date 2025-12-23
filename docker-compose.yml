@@ -1,0 +1,38 @@
+version: '3'
+
+services:
+  app:
+    build: .
+    container_name: marxist-bot
+    restart: always
+    ports:
+      - "5001:5000"
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - FLASK_ENV=production
+      - APP_URL=${APP_URL}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GOOGLE_CSE_ID=${GOOGLE_CSE_ID}
+      - SERPAPI_API_KEY=${SERPAPI_API_KEY}
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USERNAME=${REDDIT_USERNAME}
+      - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      - REDDIT_USER_AGENT=${REDDIT_USER_AGENT}
+      - DISCORD_ERROR_WEBHOOK_URL=${DISCORD_ERROR_WEBHOOK_URL}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY}
+      - PYTHONUNBUFFERED=1  # Ensure Python output is not buffered
+    volumes:
+      - .:/app
+      - ./logs:/app/logs  # Mount logs directory for persistence
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"

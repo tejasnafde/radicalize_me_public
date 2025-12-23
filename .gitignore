@@ -6,3 +6,11 @@ praw.ini
 reddit_test.py
 venv_3_13/
 test/
+.DS_Store
+/main.py
+/tools.py
+logs/
+*.log
+
+# Test scripts (consolidated in tests.py)
+test_*.py
