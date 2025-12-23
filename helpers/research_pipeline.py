@@ -13,6 +13,7 @@ from .logger import get_logger
 import re
 from .search_apis import SearchAPIManager
 from .common_helpers import CommonHelpers
+from .reddit_helper import RedditHelper
 import asyncio
 import os
 import google.generativeai as genai
@@ -39,6 +40,7 @@ class ResearchPipeline:
         self.logger = get_logger()
         self.search_manager = SearchAPIManager()
         self.common_helpers = CommonHelpers()
+        self.reddit_helper = RedditHelper()
         
         # Configure Google API
         genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
@@ -59,7 +61,19 @@ class ResearchPipeline:
                     timeout=45  # Increased timeout for complex prompts
                 )
             })
-            self.logger.debug("Groq provider initialized successfully with enhanced settings", "LLM_INIT")
+            # Fallback model with smaller context window for large content
+            self.llm_providers.append({
+                'name': 'groq_small',
+                'llm': ChatGroq(
+                    model_name="llama3-8b-8192",  # Smaller model with same context window
+                    temperature=0.3,
+                    max_tokens=2000,
+                    groq_api_key=os.getenv('GROQ_API_KEY'),
+                    max_retries=1,
+                    timeout=30
+                )
+            })
+            self.logger.debug("Groq providers initialized successfully (70B and 8B models)", "LLM_INIT")
         else:
             self.logger.debug("Groq provider not available - GROQ_API_KEY not set", "LLM_INIT")
         
@@ -127,9 +141,9 @@ class ResearchPipeline:
             'cpusa.org', 'bolshevik.org', 'revcom.us',
             'socialistreview.org.uk', 'isreview.org', 'jacobinmag.com',
             'monthlyreview.org', 'solidarity-us.org', 'communist-party.org.uk',
-            'cpgb-ml.org', 'proletarian.co.uk', 'labournet.net',
-            'encyclopedia.com', 'britannica.com', 'jstor.org',
-            'cambridge.org', 'tandfonline.com', 'springer.com'
+            'cpgb-ml.org', 'proletarian.co.uk', 'labournet.net'
+            # 'encyclopedia.com', 'britannica.com', 'jstor.org',
+            # 'cambridge.org', 'tandfonline.com', 'springer.com'
         ]
         self.headers = {'User-Agent': 'MarxistResearchBot/2.1'}
         self.parser = PydanticOutputParser(pydantic_object=Response)
@@ -246,6 +260,56 @@ Your turn - optimize this query:"""),
                 "pdf_links": []
             }
 
+    def _truncate_content_for_token_limit(self, research_data: Dict, max_tokens: int = 4000) -> Dict:
+        """
+        Truncate research data to fit within token limits.
+        Rough estimate: 1 token ≈ 4 characters for English text
+        """
+        max_chars = max_tokens * 4  # Conservative estimate
+        
+        # Create a copy to avoid modifying original data
+        truncated_data = research_data.copy()
+        
+        # Truncate sources content
+        if 'sources' in truncated_data:
+            total_chars = 0
+            truncated_sources = []
+            
+            for source in truncated_data['sources']:
+                source_copy = source.copy()
+                content = source_copy.get('content', '')
+                
+                # Reserve space for other fields and structure
+                remaining_chars = max_chars - total_chars - 1000  # 1000 chars buffer
+                
+                if remaining_chars <= 0:
+                    break
+                    
+                if len(content) > remaining_chars:
+                    # Truncate content but try to end at a sentence
+                    truncated_content = content[:remaining_chars]
+                    last_period = truncated_content.rfind('.')
+                    if last_period > remaining_chars * 0.7:  # If we can keep 70% of content
+                        truncated_content = truncated_content[:last_period + 1]
+                    source_copy['content'] = truncated_content + "... [Content truncated due to length]"
+                
+                truncated_sources.append(source_copy)
+                total_chars += len(source_copy.get('content', ''))
+                
+                if total_chars >= max_chars * 0.8:  # Use 80% of available space
+                    break
+            
+            truncated_data['sources'] = truncated_sources
+        
+        # Also truncate other content fields
+        for key in ['web_results', 'reddit_results']:
+            if key in truncated_data and isinstance(truncated_data[key], dict):
+                content = truncated_data[key].get('content', '')
+                if len(content) > 1000:  # Limit other content to 1000 chars
+                    truncated_data[key]['content'] = content[:1000] + "... [Truncated]"
+        
+        return truncated_data
+
     async def generate_response(self, query: str, research_data: Dict, provider: Dict) -> Dict:
         """Generates a structured response based on research data"""
         try:
@@ -254,13 +318,14 @@ Your turn - optimize this query:"""),
             pdf_links = []
             used_sources = []
             
+            # Prepare source tracking from research data
             for source in research_data.get("sources", []):
                 if source.get("type") == "pdf":
                     pdf_links.append({
                         "title": source.get("title", "PDF Document"),
                         "url": source.get("url")
                     })
-                # Add all sources to a list for tracking
+                # Add all sources to tracking list
                 used_sources.append({
                     "url": source.get("url"),
                     "title": source.get("title", ""),
@@ -268,16 +333,21 @@ Your turn - optimize this query:"""),
                     "cited": False  # Will be set to True if found in the response
                 })
             
-            # Determine if sources are available (either regular sources or PDF links)
-            sources_available = len(research_data.get("sources", [])) > 0 or len(pdf_links) > 0
+            # Check if we have sources
+            sources_count = len(research_data.get('sources', []))
+            pdf_count = len(research_data.get('pdf_links', []))
+            sources_available = sources_count > 0 or pdf_count > 0
+            self.logger.debug(f"Sources available - {sources_count} sources, {pdf_count} PDF links", "PIPELINE")
             
-            if not sources_available:
-                self.logger.warning("No sources found in research data - LLM will provide analysis without citations", "PIPELINE")
-            else:
-                self.logger.debug(f"Sources available - {len(research_data.get('sources', []))} sources, {len(pdf_links)} PDF links", "PIPELINE")
-
             self.logger.debug(f"Generating response for query: {query}", "PIPELINE")
-            self.logger.debug(f"Research data sources: {len(research_data.get('sources', []))}", "PIPELINE")
+            self.logger.debug(f"Research data sources: {sources_count}", "PIPELINE")
+            
+            # Truncate content to fit within token limits
+            truncated_data = self._truncate_content_for_token_limit(research_data, max_tokens=4000)
+            truncated_sources_count = len(truncated_data.get('sources', []))
+            self.logger.debug(f"Content truncated: {sources_count} -> {truncated_sources_count} sources", "PIPELINE")
+            
+            # Create the analysis prompt template
             self.logger.debug("Creating analysis prompt template...", "PIPELINE")
             # Create the prompt template with proper output formatting
             analysis_prompt = ChatPromptTemplate.from_messages([
@@ -331,18 +401,18 @@ Your turn - optimize this query:"""),
             try:
                 formatted_prompt = analysis_prompt.format(
                     query=query,
-                    context=json.dumps(research_data),
+                    context=json.dumps(truncated_data),
                     agent_scratchpad=[]
                 )
                 self.logger.debug("Prompt formatted successfully", "PIPELINE")
             except KeyError as ke:
                 self.logger.error(f"Missing required parameter in prompt template: {str(ke)}", "PIPELINE")
-                self.logger.error(f"Available parameters: query={query}, context={json.dumps(research_data)[:100]}...", "PIPELINE")
+                self.logger.error(f"Available parameters: query={query}, context={json.dumps(truncated_data)[:100]}...", "PIPELINE")
                 raise ValueError(f"Prompt template formatting failed: {str(ke)}")
             except Exception as e:
                 self.logger.error(f"Error formatting prompt: {str(e)}", "PIPELINE")
                 self.logger.error(f"Error type: {type(e).__name__}", "PIPELINE")
-                self.logger.error(f"Prompt template variables: query={query}, context={json.dumps(research_data)[:100]}...", "PIPELINE")
+                self.logger.error(f"Prompt template variables: query={query}, context={json.dumps(truncated_data)[:100]}...", "PIPELINE")
                 raise
             # Log the formatted prompt for debugging
             self.logger.debug(f"Formatted prompt for {provider['name']}: {formatted_prompt}", "PIPELINE")
@@ -578,12 +648,20 @@ Your turn - optimize this query:"""),
                 scraped_data = await self.scrape_urls(web_results)
                 research_data['sources'].extend(scraped_data)
             
-            # Gather Reddit results
+            # Gather Reddit results using new RedditHelper
             try:
-                reddit_results = await self.reddit_search(optimized_query)
-                if reddit_results:
+                reddit_results = await self.reddit_helper.search_reddit(optimized_query)
+                if reddit_results and reddit_results.get('content') != "No relevant Reddit discussions found":
                     research_data['reddit_results'] = reddit_results
-                    research_data['sources'].extend(reddit_results.get('posts', []))
+                    # Add Reddit posts as sources
+                    if reddit_results.get('sources'):
+                        for source_url in reddit_results['sources']:
+                            research_data['sources'].append({
+                                'url': source_url,
+                                'title': 'Reddit Discussion',
+                                'content': reddit_results['content'][:500],  # Preview
+                                'type': 'reddit'
+                            })
             except Exception as e:
                 self.logger.error(f"Reddit search failed: {str(e)}", "PIPELINE")
             
@@ -679,62 +757,6 @@ Your turn - optimize this query:"""),
                 continue
                 
         return scraped_content
-
-    async def reddit_search(self, query: str) -> Dict:
-        """Searches Reddit for relevant discussions"""
-        try:
-            await self.common_helpers.check_rate_limit('reddit_search')
-            results = []
-            sources = []
-            allowed_subreddits = {
-                'communism101', 'socialism', 'marxism',
-                'communism', 'leftcommunism'
-            }
-            
-            for sub in allowed_subreddits:
-                try:
-                    submissions = self.common_helpers.reddit_client.subreddit(sub).search(
-                        query,
-                        limit=3,
-                        time_filter="year",
-                        sort="relevance"
-                    )
-                    
-                    for post in submissions:
-                        # Skip removed or deleted posts
-                        if hasattr(post, 'removed_by_category') or not hasattr(post, 'selftext') or post.selftext in ('[removed]', '[deleted]'):
-                            continue
-                        
-                        # Add post content
-                        content = f"**{post.title}**\nScore: {post.score}\n{post.selftext[:500]}"
-                        results.append(content)
-                        sources.append(f"https://reddit.com{post.permalink}")
-                        
-                        # Get top comments
-                        post.comments.replace_more(limit=0)  # Don't load MoreComments
-                        for comment in post.comments.list()[:3]:  # Top 3 comments
-                            if hasattr(comment, 'body') and comment.body.strip() and not getattr(comment, 'removed', False):
-                                author = getattr(comment, 'author', '[deleted]')
-                                results.append(f"Comment by {author}: {comment.body[:300]}")
-                                sources.append(f"https://reddit.com{comment.permalink}")
-                
-                except Exception as e:
-                    self.logger.error(f"Error searching subreddit {sub}: {str(e)}", "PIPELINE")
-                    continue
-            
-            return {
-                "content": "\n\n".join(results)[:4000] if results else "No relevant Reddit discussions found",
-                "sources": sources,
-                "tool_name": "reddit_search"
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Reddit search failed: {str(e)}", "PIPELINE")
-            return {
-                "content": f"Reddit error: {str(e)}",
-                "sources": [],
-                "tool_name": "error in reddit_search"
-            }
 
     def format_response(self, analysis_response: str) -> Dict:
         """Formats the analysis response"""

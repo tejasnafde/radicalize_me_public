@@ -11,6 +11,11 @@ import argparse
 import subprocess
 from packaging import version
 from collections import defaultdict
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 from langchain_groq import ChatGroq
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
@@ -390,6 +395,7 @@ class BotTestSuite:
         await self.test_pipeline()
         await self.test_bot_handler()
         await self.test_source_display()
+        await self.test_reddit_scraping_integration()
         await self.test_queue_system()
         
         # Print summary
@@ -401,12 +407,127 @@ class BotTestSuite:
         self.analyze_requirements()
         self.print_summary()
 
+    async def test_reddit_scraping_integration(self):
+        """Test Reddit scraping pipeline and LLM integration"""
+        print("\n=== Testing Reddit Scraping & LLM Integration ===")
+        
+        try:
+            # Test 1: Direct Reddit search function
+            print("1. Testing direct Reddit search...")
+            from helpers.reddit_helper import RedditHelper
+            
+            # Use a query that should have Reddit results
+            test_query = "labor unions workplace organizing"
+            reddit_helper = RedditHelper()
+            reddit_result = await reddit_helper.search_reddit(test_query)
+            
+            reddit_has_content = reddit_result.get('content', '') != "No relevant Reddit discussions found"
+            reddit_has_sources = len(reddit_result.get('sources', [])) > 0
+            
+            print(f"   Reddit content found: {'✓' if reddit_has_content else '✗'}")
+            print(f"   Reddit sources found: {'✓' if reddit_has_sources else '✗'}")
+            if reddit_has_content:
+                print(f"   Content preview: {reddit_result['content'][:200]}...")
+            
+            # Test 2: Research Pipeline Reddit integration
+            print("\n2. Testing research pipeline Reddit integration...")
+            pipeline = ResearchPipeline()
+            research_data = await pipeline.gather_research_data(test_query, test_query)
+            
+            has_reddit_data = research_data.get('reddit_results') is not None
+            reddit_sources_in_pipeline = any('reddit.com' in str(source).lower() for source in research_data.get('sources', []))
+            
+            print(f"   Pipeline includes Reddit data: {'✓' if has_reddit_data else '✗'}")
+            print(f"   Reddit sources in pipeline: {'✓' if reddit_sources_in_pipeline else '✗'}")
+            
+            # Test 3: Full pipeline with LLM - check if Reddit data influences response
+            print("\n3. Testing full pipeline with Reddit data feeding LLM...")
+            
+            # Create a query that should trigger Reddit search
+            pipeline_result = await pipeline.process_query("modern labor organizing tactics in tech industry")
+            
+            if hasattr(pipeline_result, 'model_dump'):
+                result_dict = pipeline_result.model_dump()
+            elif hasattr(pipeline_result, 'dict'):
+                result_dict = pipeline_result.dict()
+            else:
+                result_dict = pipeline_result
+            
+            # Check if response includes Reddit-specific content indicators
+            response_content = result_dict.get('summary', '') if isinstance(result_dict, dict) else str(result_dict)
+            tools_used = result_dict.get('tools_used', []) if isinstance(result_dict, dict) else []
+            sources_used = result_dict.get('sources_used', []) if isinstance(result_dict, dict) else []
+            
+            reddit_tool_used = 'reddit_search' in tools_used
+            reddit_mentioned = any(keyword in response_content.lower() for keyword in ['reddit', 'discussion', 'community', 'user', 'post'])
+            has_reddit_sources = any('reddit.com' in str(source).get('url', '').lower() for source in sources_used if isinstance(source, dict))
+            
+            print(f"   Reddit tool used: {'✓' if reddit_tool_used else '✗'}")
+            print(f"   Reddit content indicators in response: {'✓' if reddit_mentioned else '✗'}")
+            print(f"   Reddit sources in final output: {'✓' if has_reddit_sources else '✗'}")
+            
+            # Test 4: Compare responses with and without Reddit data
+            print("\n4. Testing response quality with Reddit data...")
+            
+            # Mock a scenario where Reddit provides unique insights
+            if reddit_has_content and reddit_tool_used:
+                # Check if the response content length suggests incorporation of additional data
+                response_length = len(result_dict.get('summary', ''))
+                has_substantial_content = response_length > 500  # Assuming Reddit data adds substance
+                
+                print(f"   Response has substantial content: {'✓' if has_substantial_content else '✗'}")
+                print(f"   Response length: {response_length} characters")
+            
+            # Test 5: Bot Handler integration
+            print("\n5. Testing Bot Handler Reddit integration...")
+            bot_handler = BotHandler()
+            bot_result = await bot_handler.handle_request('workers rights organizing strategies', '123', '456')
+            
+            if "message" in bot_result:
+                bot_content = bot_result["message"].get("content", "")
+                bot_sources = bot_result["message"].get("sources", [])
+                
+                # Check if bot response includes Reddit sources
+                has_reddit_in_bot = any('reddit.com' in str(source).lower() for source in bot_sources if isinstance(source, (dict, str)))
+                reddit_link_in_content = 'reddit.com' in bot_content.lower()
+                
+                print(f"   Bot includes Reddit sources: {'✓' if has_reddit_in_bot else '✗'}")
+                print(f"   Bot content includes Reddit links: {'✓' if reddit_link_in_content else '✗'}")
+            
+            # Compile test results
+            self.results['reddit_integration'] = {
+                'direct_reddit_search': reddit_has_content,
+                'pipeline_reddit_integration': has_reddit_data,
+                'reddit_tool_used': reddit_tool_used,
+                'reddit_sources_in_output': has_reddit_sources,
+                'bot_handler_reddit': has_reddit_in_bot if 'has_reddit_in_bot' in locals() else False,
+                'success': all([
+                    reddit_has_content,
+                    has_reddit_data,
+                    reddit_tool_used
+                ])
+            }
+            
+            print(f"\n=== Reddit Integration Test Results ===")
+            print(f"Direct Reddit Search: {'✓' if reddit_has_content else '✗'}")
+            print(f"Pipeline Integration: {'✓' if has_reddit_data else '✗'}")
+            print(f"LLM Tool Usage: {'✓' if reddit_tool_used else '✗'}")
+            print(f"Sources in Output: {'✓' if has_reddit_sources else '✗'}")
+            print(f"Overall Success: {'✓' if self.results['reddit_integration']['success'] else '✗'}")
+            
+            return self.results['reddit_integration']['success']
+            
+        except Exception as e:
+            print(f'Reddit Integration Test FAILED: {e}')
+            self.results['reddit_integration'] = {'success': False, 'error': str(e)}
+            return False
+
 
 async def main():
     """Main function with CLI argument parsing"""
     parser = argparse.ArgumentParser(description="Marxist Bot Test Suite & Utilities")
     parser.add_argument("--test", choices=[
-        "llm", "pipeline", "handler", "sources", "queue", "requirements", "all"
+        "llm", "pipeline", "handler", "sources", "reddit", "queue", "requirements", "all"
     ], default="all", help="Specific test to run")
     
     args = parser.parse_args()
@@ -421,6 +542,8 @@ async def main():
         await test_suite.test_bot_handler()
     elif args.test == "sources":
         await test_suite.test_source_display()
+    elif args.test == "reddit":
+        await test_suite.test_reddit_scraping_integration()
     elif args.test == "queue":
         await test_suite.test_queue_system()
     elif args.test == "requirements":

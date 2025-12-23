@@ -17,7 +17,7 @@ from .logger import get_logger
 os.makedirs('logs', exist_ok=True)
 
 # Use our custom logger
-logger = get_logger(__name__)
+logger = get_logger()
 
 class CommonHelpers:
     def __init__(self):
@@ -100,7 +100,6 @@ class CommonHelpers:
                 logger.info(message)
             else:
                 logger.error(message)
-
             # Format the message based on type
             if error_type == "DEBUG" and isinstance(message, str) and message.startswith("{"):
                 # Parse JSON debug message
@@ -143,7 +142,6 @@ class CommonHelpers:
                     logger.error(f"[{error_type}] {message}")
                 else:
                     logger.info(f"[{error_type}] {message}")
-
             # Send to webhook if available
             if self.webhook_url:
                 try:
@@ -168,10 +166,6 @@ class CommonHelpers:
         """Send info messages to Discord"""
         self.report_to_discord(message, "INFO")
 
-    # def rotate_api_key(self) -> str:
-    #     """Rotate between different API keys to avoid rate limits"""
-    #     return self.api_keys[int(time.time()) % len(self.api_keys)]
-
     def validate_query(self, query: str) -> bool:
         """Validate the user's query"""
         if not query or len(query.strip()) == 0:
@@ -179,7 +173,6 @@ class CommonHelpers:
         if len(query) > 500:  # Arbitrary limit
             return False
         return True
-
 
     def log_request(self, request_data: Dict) -> None:
         """Log incoming requests"""
