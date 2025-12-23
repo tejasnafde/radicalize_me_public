@@ -12,7 +12,10 @@ import praw
 from functools import lru_cache
 from praw.models import MoreComments
 from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
-from pydantic import BaseModel, Field
+try:
+    from pydantic.v1 import BaseModel, Field
+except ImportError:
+    from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 import time
 
@@ -199,11 +202,13 @@ def reddit_search(query: str, time_filter: str = "year") -> Dict:
                 )
                 
                 for post in submissions:
-                    # Updated removal check
-                    if hasattr(post, 'removed_by_category') or not hasattr(post, 'selftext') or post.selftext in ('[removed]', '[deleted]'):
+                    # Skip actually removed or deleted posts
+                    if (hasattr(post, 'removed_by_category') and post.removed_by_category is not None) or (hasattr(post, 'selftext') and post.selftext in ('[removed]', '[deleted]')):
                         continue
                     
-                    content = f"**{post.title}**\nScore: {post.score}\n{post.selftext[:500]}"
+                    # Build content from title and available text
+                    post_text = post.selftext[:500] if hasattr(post, 'selftext') and post.selftext else "Link post - see URL for content"
+                    content = f"**{post.title}**\nScore: {post.score}\n{post_text}"
                     results.append(content)
                     sources.append(f"https://reddit.com{post.permalink}")
                     
