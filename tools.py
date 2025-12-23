@@ -1,14 +1,34 @@
+import json
 from typing import Annotated
 from langchain.tools import tool
 from bs4 import BeautifulSoup
 import requests
 from urllib.parse import quote_plus
-from typing import List
+from typing import List, Dict, Optional
 import backoff
 import re
 import os
 import praw
+from functools import lru_cache
 from praw.models import MoreComments
+from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
+try:
+    from pydantic.v1 import BaseModel, Field
+except ImportError:
+    from pydantic import BaseModel, Field
+from tenacity import retry, stop_after_attempt, wait_exponential
+import time
+
+
+@retry(stop=stop_after_attempt(3), 
+       wait=wait_exponential(multiplier=1, min=4, max=10),
+       reraise=True)
+async def safe_ai_call(invoke_func, *args, **kwargs):
+    try:
+        return await invoke_func(*args, **kwargs)
+    except Exception as e:
+        print(f"API Error: {str(e)}")
+        raise
 
 allowed_domains = [
     'marxists.org',
@@ -20,6 +40,7 @@ allowed_domains = [
     'reddit.com'
 ]
 
+@lru_cache(maxsize=100)
 def get_reddit_client():
     return praw.Reddit(
         client_id=os.getenv('REDDIT_CLIENT_ID'),
@@ -30,6 +51,79 @@ def get_reddit_client():
         ratelimit_seconds=300,
         check_for_async=False
     )
+
+class ToolOutput(BaseModel):
+    content: str = Field(description="Processed content from the tool")
+    sources: List[str] = Field(description="List of source URLs used")
+    tool_name: str
+
+class RestrictedWebSearchInput(BaseModel):
+    query: str = Field(description="Search query to look up")
+
+class UrlScraperInput(BaseModel):
+    url: str = Field(description="URL to scrape content from")
+class RedditSearchInput(BaseModel):
+    query: str = Field(description="Search query for Reddit")
+    time_filter: str = Field("year", description="Time filter for search", enum=["hour", "day", "week", "month", "year"])
+
+@tool(args_schema=RestrictedWebSearchInput)
+@retry
+def restricted_web_search(query: str) -> Dict:
+    """Performs web search restricted to allowed domains using DuckDuckGo.
+    Use for initial research phase to gather relevant documents.
+    """
+    try:
+        site_filter = " OR ".join([f"site:{d}" for d in allowed_domains])
+        enhanced_query = f"{query} {site_filter}"
+        print(f"Sending request to DuckDuckGo with query length: {len(enhanced_query)}")
+        search = DuckDuckGoSearchAPIWrapper(max_results=5)
+        results = search.results(enhanced_query, 5)
+        
+        # Log the actual response for debugging
+        print(f"Raw search results: {results}")
+
+        # Check if results is a list and handle accordingly
+        if isinstance(results, list):
+            print("Received a list instead of an expected object.")
+            return ToolOutput(
+                content="Search error: Unexpected response format.",
+                sources=[],
+                tool_name="error in restricted web search"
+            ).dict()
+
+        print(f"Response status: {results.status if results else 'None'}")
+        filtered = [
+            {"title": r["title"], "url": r["link"], "snippet": r["snippet"]}
+            for r in results if any(d in r["link"] for d in allowed_domains)
+        ]
+        print(f"18apr debug {filtered=}")
+        return ToolOutput(
+            content=json.dumps(filtered),
+            sources=[r["url"] for r in filtered],
+            tool_name="restricted_web_search"
+        ).dict()
+    
+    except Exception as e:
+        print(f"Error during search: {str(e)}")
+        if "Ratelimit" in str(e):
+            print("Rate limit reached. Waiting before retrying...")
+            time.sleep(10)  # Wait for 10 seconds before retrying
+            return restricted_web_search(query)  # Retry the same query
+
+        # Attempt a second call with a modified query
+        try:
+            fallback_query = f"{query} site:marxists.org"
+            print(f"Retrying with fallback query: {fallback_query}")
+            results = search.results(fallback_query, 5)
+            # Process results as before...
+            # (Include the same logic for processing results here)
+        except Exception as fallback_exception:
+            print(f"Error on fallback: {str(fallback_exception)}")
+        return ToolOutput(
+                content=f"Search error on fallback: {str(fallback_exception)}",
+            sources=[],
+            tool_name="error in restricted web search"
+        ).dict()
 
 allowed_subreddits = {
     'communism101', 'socialism', 'marxism',
@@ -89,144 +183,91 @@ def is_quality_content(submission) -> bool:
             not submission.author == "[deleted]" and
             not submission.removed_by_category)
 
-@tool
-def reddit_search(query: str) -> str:
-    """CONTEMPORARY WORKING CLASS PERSPECTIVES (POST-2020). MUST USE WHEN:
-    - Analyzing events after 2020
-    - Seeking first-hand proletarian experiences
-    - Validating modern applications of theory
-    - No pre-2000 sources exist on topic
-    
-    Returns posts from r/communism101 and related subs with comment analysis."""
+@tool(args_schema=RedditSearchInput)
+@retry
+def reddit_search(query: str, time_filter: str = "year") -> Dict:
+    """Searches Marxist subreddits for contemporary working-class perspectives."""
     try:
         reddit = get_reddit_client()
-        subreddit = "communism101"
-        if subreddit.lower() not in allowed_subreddits:
-            return f"❌ Subreddit {subreddit} not allowed"
-            
-        sr = reddit.subreddit(subreddit)
         results = []
+        sources = []
         
-        for submission in sr.search(query, limit=5):
-            if not is_quality_content(submission):
-                continue
+        for sub in allowed_subreddits:
+            try:
+                submissions = reddit.subreddit(sub).search(
+                    query,
+                    limit=3,
+                    time_filter=time_filter,
+                    sort="relevance"
+                )
                 
-            content = f"""
-            **{submission.title}** (Score: {submission.score})
-            {submission.selftext[:500]}
-            URL: {submission.url}
-            """
-            results.append(content.strip())
-
-            submission.comments.replace_more(limit=0)
-            for comment in submission.comments[:3]:
-                if (query.lower() in comment.body.lower() 
-                        and comment.score > 1 
-                        and not comment.removed):
-                    results.append(
-                        f"💬 Comment by u/{comment.author} (Score: {comment.score}):\n"
-                        f"{comment.body[:300]}"
-                    )
-                if len(results) >= 8:
-                    break
+                for post in submissions:
+                    # Skip actually removed or deleted posts
+                    if (hasattr(post, 'removed_by_category') and post.removed_by_category is not None) or (hasattr(post, 'selftext') and post.selftext in ('[removed]', '[deleted]')):
+                        continue
                     
-        return ("🔴 Reddit Analysis:\n" + "\n\n".join(results)[:4000] 
-                or "No quality discussions found") + f"\n\nFull Search: {format_reddit_url(subreddit, query)}"
-        
-    except Exception as e:
-        return f"❌ Reddit error: {str(e)}"
-
-@tool
-def marxists_org_search(query: str) -> str:
-    """MUST USE FIRST FOR HISTORICAL CONTEXT. Primary Marxist-Leninist sources:
-    - Foundational texts (pre-2000)
-    - Historical party documents
-    - Revolutionary history
-    - Dialectical materialist analyses
-    
-    Returns archival documents with metadata."""
-    scraper = MarxistScraper()
-    try:
-        search_url = f"https://www.marxists.org/archive/search.htm?query={quote_plus(query)}"
-        html = scraper._fetch(search_url)
-        results = scraper._parse_marxists_org(html, query)
+                    # Build content from title and available text
+                    post_text = post.selftext[:500] if hasattr(post, 'selftext') and post.selftext else "Link post - see URL for content"
+                    content = f"**{post.title}**\nScore: {post.score}\n{post_text}"
+                    results.append(content)
+                    sources.append(f"https://reddit.com{post.permalink}")
+                    
+                    # Handle comments more carefully
+                    post.comments.replace_more(limit=0)  # Don't load MoreComments
+                    for comment in post.comments.list()[:3]:  # Top 3 comments
+                        if hasattr(comment, 'body') and comment.body.strip() and not getattr(comment, 'removed', False):
+                            author = getattr(comment, 'author', '[deleted]')
+                            results.append(f"Comment by {author}: {comment.body[:300]}")
+                            sources.append(f"https://reddit.com{comment.permalink}")
             
-        formatted = []
-        for i, res in enumerate(results, 1):
-            formatted.append(f"[Source {i}] {res['title']}\nURL: {res['url']}\n{res['excerpt']}")
+            except Exception as e:
+                print(f"Error searching subreddit {sub}: {str(e)}")
+                continue
         
-        return "marxists.org Results:\n" + "\n\n".join(formatted)
-    except Exception as e:
-        return f"❌ marxists.org error: {str(e)}"
-
-@tool
-def marxist_com_search(query: str) -> str:
-    """MODERN TROTSKYIST ANALYSIS (POST-2000). MUST USE FOR:
-    - Current events analysis
-    - Labor struggles
-    - Marxist tendency debates
-    - Imperialism analysis
+        return ToolOutput(
+            content="\n\n".join(results)[:4000] if results else "No relevant Reddit discussions found",
+            sources=sources,
+            tool_name="reddit_search"
+        ).dict()
     
-    Returns contemporary articles with dates."""
-    scraper = MarxistScraper()
-    try:
-        search_url = f"https://www.marxist.com/search-results.htm?q={quote_plus(query)}"
-        html = scraper._fetch(search_url)
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        results = []
-        for article in soup.select('.search-result-item'):
-            title = article.select_one('h3 a').text.strip()
-            url = article.select_one('h3 a')['href']
-            date = article.select_one('.date').text.strip()
-            excerpt = article.select_one('.excerpt').text.strip()
-            results.append(f"{date} - {title}\n{url}\n{excerpt}")
-        
-        return "Marxist.com Results:\n" + "\n\n".join(results[:3])
     except Exception as e:
-        return f"❌ Marxist.com error: {str(e)}"
+        return ToolOutput(
+            content=f"Reddit error: {str(e)}",
+            sources=[],
+            tool_name="error in reddit_search"
+        ).dict()
 
-@tool
-def bannedthought_search(query: str) -> str:
-    """MUST USE FOR NON-WESTERN PERSPECTIVES. Includes:
-    - Active revolutionary movements
-    - Prohibited party materials
-    - Censored analyses
-    - Anti-imperialist struggles
-    
-    Returns primary sources from active conflicts."""
-    scraper = MarxistScraper()
+
+
+@tool(args_schema=UrlScraperInput)
+@retry
+def url_scraper(url: str) -> Dict:
+    """Scrapes and processes content from a single URL. 
+    Verify URL belongs to allowed domains before scraping.
+    """
     try:
-        search_url = f"https://www.bannedthought.net/api/search?q={quote_plus(query)}"
-        response = scraper.session.get(search_url)
+        if not any(d in url for d in allowed_domains):
+            raise ValueError("Prohibited domain")
+            
+        response = requests.get(url, timeout=15, headers={'User-Agent': 'ResearchBot/2.0'})
         response.raise_for_status()
         
-        results = []
-        for item in response.json()['results'][:3]:
-            results.append(f"{item['title']}\n{item['url']}\n{item['excerpt']}")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        main_content = soup.find('article') or soup.find('main') or soup.body
         
-        return "BannedThought.net Results:\n" + "\n\n".join(results)
+        # Clean content
+        text = main_content.get_text(separator='\n', strip=True)
+        text = re.sub(r'\n{3,}', '\n\n', text)[:3000]  # Truncate to fit context
+        
+        return ToolOutput(
+            content=text,
+            sources=[url],
+            tool_name="url_scrapper"
+        ).dict()
+        
     except Exception as e:
-        return f"❌ BannedThought error: {str(e)}"
-
-@tool
-def url_scraper(url: str) -> str:
-    """MUST USE WHEN CITING SPECIFIC SOURCES. Validates:
-    - Direct quotes
-    - Statistical claims
-    - Historical references
-    
-    Returns verified content from provided URL."""
-    scraper = MarxistScraper()
-    try:
-        html = scraper._fetch(url)
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        content = soup.find('div', class_='marxist-content') or \
-                 soup.find('article') or \
-                 soup.find('main')
-        
-        clean_text = scraper._clean_text(content.text)
-        return f"Verified content from {url}:\n{clean_text[:3000]}..."
-    except Exception as e:
-        return f"❌ Scraping error: {str(e)}"
+        return ToolOutput(
+            content=f"Scraping error: {str(e)}",
+            sources=[],
+            tool_name="error in url_scrapper"
+        ).dict()
