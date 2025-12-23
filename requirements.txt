@@ -33,7 +33,7 @@ google-auth-httplib2==0.2.0
 duckduckgo_search==8.0.2
 
 # Semantic Search and Embeddings
-sentence-transformers==2.2.2
+sentence-transformers==2.6.0
 
 # Data Processing and Validation
 pydantic==2.10.6
