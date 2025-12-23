@@ -53,19 +53,19 @@ class ResearchPipeline:
             self.llm_providers.append({
                 'name': 'groq',
                 'llm': ChatGroq(
-                    model_name="llama3-70b-8192",  # Updated to current production model
+                    model_name="llama-3.3-70b-versatile",  # Updated to current production model
                     temperature=0.3,
-                    max_tokens=2000,  # Increased slightly for complex analysis
+                    max_tokens=2000,
                     groq_api_key=os.getenv('GROQ_API_KEY'),
-                    max_retries=1,  # Allow one retry for transient errors
-                    timeout=45  # Increased timeout for complex prompts
+                    max_retries=1,
+                    timeout=45
                 )
             })
-            # Fallback model with smaller context window for large content
+            # Fallback model - faster, smaller context
             self.llm_providers.append({
                 'name': 'groq_small',
                 'llm': ChatGroq(
-                    model_name="llama3-8b-8192",  # Smaller model with same context window
+                    model_name="llama-3.1-8b-instant",  # Updated to current instant model
                     temperature=0.3,
                     max_tokens=2000,
                     groq_api_key=os.getenv('GROQ_API_KEY'),
@@ -73,7 +73,7 @@ class ResearchPipeline:
                     timeout=30
                 )
             })
-            self.logger.debug("Groq providers initialized successfully (70B and 8B models)", "LLM_INIT")
+            self.logger.debug("Groq providers initialized successfully (llama-3.3-70b-versatile and llama-3.1-8b-instant)", "LLM_INIT")
         else:
             self.logger.debug("Groq provider not available - GROQ_API_KEY not set", "LLM_INIT")
         
