@@ -664,7 +664,6 @@ Your turn - optimize this query:"""),
                             })
             except Exception as e:
                 self.logger.error(f"Reddit search failed: {str(e)}", "PIPELINE")
-            
             self.logger.debug(f"Gathered {len(research_data['sources'])} total sources", "PIPELINE")
             return research_data
             

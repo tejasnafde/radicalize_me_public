@@ -32,6 +32,9 @@ google-auth==2.38.0
 google-auth-httplib2==0.2.0
 duckduckgo_search==8.0.2
 
+# Semantic Search and Embeddings
+sentence-transformers==2.2.2
+
 # Data Processing and Validation
 pydantic==2.10.6
 pydantic-settings==2.8.1

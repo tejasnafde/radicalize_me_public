@@ -2,6 +2,7 @@ import os
 from typing import Dict, List
 from .common_helpers import CommonHelpers
 from .logger import get_logger
+from .reddit_ranker import RedditRanker
 
 
 class RedditHelper:
@@ -9,6 +10,7 @@ class RedditHelper:
         self.logger = get_logger()
         self.common_helpers = CommonHelpers()
         self.reddit = self.common_helpers.get_reddit_client()
+        self.ranker = RedditRanker()  # Initialize semantic ranker
         self.allowed_subreddits = {
             'communism101', 'socialism', 'marxism',
             'communism', 'leftcommunism'
@@ -17,7 +19,7 @@ class RedditHelper:
     async def search_reddit(self, query: str) -> Dict:
         """
         Searches Reddit for relevant discussions in leftist subreddits.
-        This is the improved version from tools.py with proper filtering.
+        Uses semantic ranking to improve relevance over engagement metrics.
         """
         try:
             await self.common_helpers.check_rate_limit('reddit_search')
@@ -46,61 +48,49 @@ class RedditHelper:
                             self.logger.debug(f"Skipping removed/deleted post: {post.title[:50]}...", "REDDIT")
                             continue
                         
-                        # Handle both text posts and link posts
-                        if hasattr(post, 'selftext') and post.selftext and post.selftext.strip():
-                            post_content = post.selftext[:800]  # Increased content length
-                        else:
-                            post_content = "Link post - see URL for content"
-                        
-                        # Store post data for sorting
-                        post_data = {
-                            "title": post.title,
-                            "content": post_content,
-                            "score": post.score,
-                            "subreddit": subreddit_name,
-                            "url": f"https://reddit.com{post.permalink}",
-                            "created_utc": post.created_utc,
-                            "num_comments": post.num_comments,
-                            "upvote_ratio": getattr(post, 'upvote_ratio', 0.0),
-                            # Calculate relevance score (score + comment engagement)
-                            "relevance_score": post.score + (post.num_comments * 0.5)
-                        }
-                        
-                        all_posts.append(post_data)
+                        # Store the actual post object for semantic ranking
+                        all_posts.append(post)
                         
                 except Exception as e:
                     self.logger.error(f"Error searching subreddit {subreddit_name}: {str(e)}", "REDDIT")
                     continue
             
             if all_posts:
-                # Sort by relevance score (descending) and take top 5
-                sorted_posts = sorted(all_posts, key=lambda x: x['relevance_score'], reverse=True)[:5]
+                # Use semantic ranking to get most relevant posts
+                self.logger.debug(f"Ranking {len(all_posts)} posts by semantic similarity", "REDDIT")
+                ranked_posts = self.ranker.rank_by_relevance(query, all_posts, top_k=5)
                 
                 results = []
                 sources = []
                 
-                for post_data in sorted_posts:
+                for post in ranked_posts:
+                    # Handle both text posts and link posts
+                    if hasattr(post, 'selftext') and post.selftext and post.selftext.strip():
+                        post_content = post.selftext[:800]  # Increased content length
+                    else:
+                        post_content = "Link post - see URL for content"
+                    
                     # Format post content
                     formatted_content = (
-                        f"**r/{post_data['subreddit']} - {post_data['title']}**\n"
-                        f"Score: {post_data['score']} | Comments: {post_data['num_comments']} | "
-                        f"Upvote Ratio: {post_data['upvote_ratio']:.2f}\n"
-                        f"{post_data['content']}\n"
-                        f"URL: {post_data['url']}"
+                        f"**r/{post.subreddit.display_name} - {post.title}**\n"
+                        f"Score: {post.score} | Comments: {post.num_comments} | "
+                        f"Upvote Ratio: {getattr(post, 'upvote_ratio', 0.0):.2f}\n"
+                        f"{post_content}\n"
+                        f"URL: https://reddit.com{post.permalink}"
                     )
                     
                     results.append(formatted_content)
-                    sources.append(post_data['url'])
+                    sources.append(f"https://reddit.com{post.permalink}")
                 
                 combined_content = "\n\n---\n\n".join(results)
                 
-                self.logger.debug(f"Reddit search completed: {len(sorted_posts)} posts found, "
+                self.logger.debug(f"Reddit search completed: {len(ranked_posts)} posts found (ranked by relevance), "
                                 f"{len(sources)} total sources, {len(combined_content)} characters", "REDDIT")
                 
                 return {
                     "content": combined_content,
                     "sources": sources,
-                    "posts_count": len(sorted_posts),
+                    "posts_count": len(ranked_posts),
                     "total_characters": len(combined_content),
                     "tool_name": "reddit_search"
                 }
